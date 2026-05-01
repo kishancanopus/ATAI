@@ -1,189 +1,129 @@
-# ATAI Hybrid Dashboard - Phase 1 Backend
+# ATAI Hybrid Dashboard
 
-This is a Next.js 16 (App Router) backend providing server-side APIs to interact with the ATAI product sourcing pipeline hosted on AWS. It powers the "hybrid" dashboard by orchestrating AWS Step Functions, Lambda, S3 and Parquet-backed datasets for ranked products and discovery criteria.
+A comprehensive Next.js 16 (App Router) hybrid dashboard and backend orchestration layer for the ATAI product sourcing pipeline. It integrates with AWS infrastructure (Step Functions, Lambda, S3) to discover, rank, and analyze products from multiple sources like Amazon and Alibaba using Parquet-backed datasets.
+
+## 🌟 Core Features
+
+### 1. Hybrid Dashboard UI
+- **Unified Interface**: A high-performance dashboard (`src/app/dashboard.tsx`) for managing search operations and visualizing product rankings.
+- **Real-time Monitoring**: Track the progress of product sourcing pipelines with live status updates.
+- **Search Presets**: Save and load complex search configurations (keywords, filters, source-specific settings) into local storage slots.
+- **Authentication**: Secure entry via a persistent session management system.
+
+### 2. Product Sourcing Pipeline
+- **AWS Orchestration**: Triggers and manages multi-stage AWS Step Functions for deep product discovery.
+- **Multi-Source Support**: Ranked results consolidated from Amazon, Alibaba, and other major marketplaces.
+- **Smart Filtering**: Advanced filters for pricing, reviews, ratings, margins (Cost Below %), and supplier verification.
+
+### 3. Keyword & Trend Intelligence
+- **Keyword Discovery**: Integrated keyword generation using SerpAPI and Google Trends.
+- **Data-Driven Ranking**: Products are scored based on search volume, trend interest, and competitive density.
+
+### 4. System Governance
+- **Discovery Criteria**: CRUD-based management of sourcing logic and discovery rules stored in S3.
+- **Debugging & Logging**: Environment sanity checks (`/api/debug-env`) and centralized server-side logging.
+
+---
+
+## 🏗️ Project Architecture
+
+```mermaid
+graph TD
+    A[Next.js 16 Frontend / React 19] --> B[Next.js API Routes]
+    B --> C[AWS Step Functions]
+    B --> D[AWS S3 - Parquet & JSON]
+    B --> E[External APIs - Google Trends / SerpAPI]
+    C --> F[AWS Lambda - Python Data Processors]
+    F --> D
+    B --> G[Local Presets Store - JSON]
+```
+
+---
 
 ## 🚀 Setup & Local Development
 
 1. **Prerequisites**
-   - Node.js 18+ (Node 20 LTS recommended)
-   - npm (comes with Node)
-   - AWS credentials with access to the relevant S3 buckets and Step Functions state machine
+   - Node.js 18+ (Node 20+ recommended)
+   - AWS CLI configured with appropriate permissions.
 
-2. **Install dependencies**
+2. **Installation**
    ```bash
    npm install
    ```
 
-3. **Configure environment variables**
-   Create a `.env.local` file in the project root. Do **not** commit real keys to git.
-
+3. **Configuration**
+   Create a `.env.local` file based on the environment structure below:
    ```env
-   # AWS region and credentials
+   # AWS infrastructure
    AWS_REGION=eu-north-1
-   AWS_ACCESS_KEY_ID=your_access_key
-   AWS_SECRET_ACCESS_KEY=your_secret_key
+   AWS_ACCESS_KEY_ID=your_key
+   AWS_SECRET_ACCESS_KEY=your_secret
 
-   # S3 buckets / keys
-   S3_CLEAN_BUCKET=your-clean-layer-bucket              # optional, for cleaned intermediate data
-   S3_RANKED_BUCKET=your-ranked-results-bucket          # e.g. atai-result-data
+   # S3 Storage
+   S3_RANKED_BUCKET=atai-result-data
    S3_RANKED_KEY=ranked/manual_search/ranked_results.parquet
-
    S3_CONFIG_BUCKET=atai-config
    S3_CRITERIA_KEY=discovery_criteria.json
 
-   # Orchestration (Step Functions / Lambda)
-   STEP_FUNCTION_ARN=arn:aws:states:...:stateMachine:your-state-machine
-   CRITERIA_EVALUATOR_FUNCTION=your-criteria-evaluator-lambda-name-or-arn
+   # Orchestration
+   STEP_FUNCTION_ARN=arn:aws:states:...
+   CRITERIA_EVALUATOR_FUNCTION=your-lambda-arn
 
-   # External services
-   SERPAPI_KEY=your_serpapi_key
+   # Application
+   APP_PASSWORD=your_secure_password
+   SERPAPI_KEY=your_key
    ```
 
-4. **Run the development server**
+4. **Running Locally**
    ```bash
+   # Development mode
    npm run dev
-   ```
-   The server will be available at `http://localhost:3000`.
 
-5. **Build & production**
-   ```bash
+   # Build & Start
    npm run build
    npm start
    ```
 
 ---
 
-## 🛠️ API Documentation (Backend Endpoints)
+## 🛠️ API Documentation
 
-### 1. Products API – Get Ranked Data
+### 🔐 Authentication
+- `POST /api/auth/login`: Authenticates user via `APP_PASSWORD` and sets a secure HttpOnly cookie.
+- `DELETE /api/auth/login`: Clears the session cookie.
 
-- **Endpoint**: `GET /api/products`
-- **Description**: Fetches the latest ranked product results from S3 with advanced keyword, location, and source-specific filters.
-- **Query params** (all optional unless stated otherwise):
-  - `keyword` (string): Filter products by keyword.
-  - `category` (string): Filter by search or leaf category.
-  - `location` (string): Location / geo filter (e.g. `us`, `se`); applied to trend and source geo fields.
-  - `blacklist` (string): Comma-separated list of words to exclude from title/keyword.
-  - `search_volume_min` (number): Minimum monthly searches (Keyword Planner).
-  - `google_trend_score` (number): Minimum Google Trends score (0–100).
-  - `search_mode` (string): `"manual_search"` (default) or `"category_search"`.
-  - `amazonFilters` (string): `"false"` to hide Amazon-based results, anything else (or omitted) keeps them enabled.
-  - `alibabaFilters` (string): `"false"` to hide Alibaba-based results, anything else (or omitted) keeps them enabled.
-  - **Amazon filters** (applied when `amazonFilters` is enabled and product `source === "amazon"`):
-    - `amz_price_min` / `amz_price_max` (number): Price range in USD.
-    - `reviews_min` / `reviews_max` (number): Review count range.
-    - `rating_min` (number): Minimum rating (0–5).
-    - `fcl_min` / `fcl_max` (number): FCL price range.
-  - **Alibaba filters** (applied when `alibabaFilters` is enabled and product `source === "alibaba"`):
-    - `margin_min` (number): Minimum margin percentage (Cost Below %).
-    - `moq_max` (number): Maximum MOQ.
-    - `supplier_rating_min` (number): Minimum supplier rating.
-    - `verified_supplier` (boolean string): `"true"` to require verified suppliers.
+### 📂 Search Presets
+- `GET /api/presets`: Retrieves all saved search presets.
+- `POST /api/presets`: Saves or renames presets (Actions: `save_new`, `rename`).
+- `DELETE /api/presets`: Deletes a preset slot by ID.
 
-- **Output format** (simplified):
-  ```json
-  [
-    {
-      "product_id": "...",
-      "title": "...",
-      "final_score": 85.5,
-      "margin_pct": 32.2
-      // other Amazon / Alibaba / trend fields...
-    }
-  ]
-  ```
+### 🍱 Product Data
+- `GET /api/products`: Fetches ranked product results from S3. Supports extensive filtering for Amazon (price, reviews, ratings) and Alibaba (margins, MOQ, supplier scores).
+- `GET /api/criteria`: Manages the discovery criteria configuration.
 
-### 2. Criteria API – Manage Discovery Criteria
+### 🔄 Pipeline Orchestration
+- `POST /api/pipeline/trigger`: Initiates a new Step Functions execution for a specific keyword or category.
+- `GET /api/pipeline/status`: Checks the current execution status of an ARN.
+- `POST /api/pipeline/stop`: Aborts a running pipeline execution.
+- `GET /api/pipeline/preliminary`: Fetches early-stage results while the full pipeline is still running.
 
-- **GET** `/api/criteria`  
-  Returns the current set of discovery criteria loaded from the config bucket.
-
-- **POST** `/api/criteria`  
-  Creates or updates a criteria entry in S3. If a `criteria_id` already exists, it is merged; otherwise it is appended.
-
-  **Request body example**:
-  ```json
-  {
-    "criteria_id": "cs_001",
-    "name": "Trending Electronics",
-    "keywords": ["smart home", "iot"],
-    "active": true,
-    "...": "..."
-  }
-  ```
-
-### 3. Pipeline Orchestration APIs
-
-These endpoints orchestrate the AWS Step Functions pipeline used to refresh ranked data.
-
-- **Trigger pipeline**
-  - **Endpoint**: `POST /api/pipeline/trigger`
-  - **Body**:
-    ```json
-    {
-      "keyword": "air purifier",
-      "search_mode": "manual_search",
-      "filters": {
-        "category": "Home & Kitchen",
-        "location": "us",
-        "search_volume_min": 1000,
-        "google_trend_score": 50,
-        "amazonFilters": true,
-        "alibabaFilters": true
-      }
-    }
-    ```
-  - **Response**: Contains `executionArn`, `execution_details` (for category search), `success`, and a `message`.
-
-- **Check pipeline status**
-  - **Endpoint**: `GET /api/pipeline/status?arn=<executionArn>`
-  - **Description**: Returns execution status (`RUNNING`, `SUCCEEDED`, `FAILED`, etc.) and timestamps.
-
-- **Stop pipeline execution**
-  - **Endpoint**: `POST /api/pipeline/stop?arn=<executionArn>`
-  - **Description**: Stops a running execution (no-op for category-search pseudo ARNs).
-
-- **Preliminary results**
-  - **Endpoint**: `GET /api/pipeline/preliminary`
-  - **Query params**:
-    - `keyword` (string, optional): Filter manual-search preliminary results by keyword.
-    - `search_mode` (string, default `"manual_search"`): `"manual_search"` or `"category_search"`.
-    - `category` (string, optional): Category filter for category-search results.
-  - **Description**: Returns early-stage consolidated results from S3 while the full pipeline may still be running.
-
-### 4. Trends & Keyword Discovery API
-
-- **Endpoint**: `GET /api/trends/related-queries`
-- **Description**: Returns related queries / keywords for a category using SerpAPI discovery first, then Google Trends as a fallback.
-- **Query params**:
-  - `category` (string, required): Category/topic to discover keywords for.
-  - `geo` (string, optional): Geo code (e.g. `US`, `SE`).
-  - `limit` (number, optional, default 50, max 100): Max keywords to return.
-  - `trendPeriod` (number, optional, default 12): Lookback window in months for Google Trends when used as a fallback.
-- **Response**:
-  ```json
-  {
-    "keywords": ["...", "..."]
-  }
-  ```
+### 📈 Trends & Keywords
+- `GET /api/trends/related-queries`: Discovers trending keywords and related queries for a given category.
 
 ---
 
-## 📦 Key Technologies & Dependencies
+## 📦 Key Technologies
 
-- **Next.js 16.1.1** (App Router) – API routes under `src/app/api`.
-- **React 19** – UI layer (if/when frontend is added in this repo).
-- **AWS SDK v3** – `@aws-sdk/client-s3`, `@aws-sdk/client-sfn`, `@aws-sdk/client-lambda` for S3, Step Functions and Lambda integration.
-- **hyparquet** – High-performance Parquet reader used to load ranked and intermediate datasets from S3.
-- **google-trends-api** – Google Trends integration for keyword and trend signals.
-- **Tailwind CSS 4** – Utility-first styling (already wired into the Next.js build).
+- **Frontend**: React 19, Tailwind CSS v4, Lucide Icons, Framer Motion.
+- **Backend Framework**: Next.js 16.1.1 (App Router).
+- **Data Processing**: `hyparquet` (Parquet parsing), `xlsx` (Excel integration).
+- **Cloud Integration**: AWS SDK v3 (@aws-sdk/client-s3, client-sfn, client-lambda).
+- **Python Backend (AWS Functions)**: Python 3.9+ for Lambda-based data cleaning and extraction.
 
-## 📂 Source Structure (Backend)
+## 📂 Source Structure
 
-- `src/app/api/products/route.ts` – Ranked products API with filtering logic.
-- `src/app/api/criteria/route.ts` – CRUD-like access for discovery criteria stored in S3.
-- `src/app/api/pipeline/*` – Pipeline orchestration endpoints (`trigger`, `status`, `stop`, `preliminary`, and stage helpers).
-- `src/app/api/trends/related-queries/route.ts` – Category/geo keyword discovery using SerpAPI + Google Trends.
-- `src/lib/s3.ts` – Shared S3 utilities for reading/writing Parquet and JSON config.
-- `src/lib/step-function.ts` – Step Functions integration, pipeline input builder, and stage-result helpers.
-- `src/lib/*.ts` – Supporting libraries for category seeds, SerpAPI integration, and Google Trends keyword discovery.
+- `/src/app`: Application pages and API routes.
+- `/src/lib`: Core services (S3, Step Functions, Product Services).
+- `/aws_functions`: Source code for AWS Lambda processors.
+- `/data`: Local cache and persistent storage for presets.
+- `/logs`: Server-side execution logs.

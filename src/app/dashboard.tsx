@@ -77,6 +77,12 @@ const Dashboard = () => {
   const [productCategory, setProductCategory] = useState('All categories');
   const [trendPeriod, setTrendPeriod] = useState('');
   const [showTrendDropdown, setShowTrendDropdown] = useState(false);
+  const [showLocationDropdown, setShowLocationDropdown] = useState(false);
+  const [showCategoryDropdown, setShowCategoryDropdown] = useState(false);
+  const [locationSearch, setLocationSearch] = useState('');
+  const [categorySearch, setCategorySearch] = useState('');
+  const [showVariantDropdown, setShowVariantDropdown] = useState(false);
+  const [variantSearch, setVariantSearch] = useState('');
   const [blacklistedWords, setBlacklistedWords] = useState<string[]>([]);
   const [blacklistInput, setBlacklistInput] = useState('');
   const [amazonFilters, setAmazonFilters] = useState(true);
@@ -129,6 +135,10 @@ const Dashboard = () => {
   // Load presets from server on mount (shared across all users)
   const [presetDropdownOpen, setPresetDropdownOpen] = useState(false);
   const dropdownRef = useRef<HTMLDivElement>(null);
+  const locationDropdownRef = useRef<HTMLDivElement>(null);
+  const categoryDropdownRef = useRef<HTMLDivElement>(null);
+  const trendDropdownRef = useRef<HTMLDivElement>(null);
+  const variantDropdownRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     function handleClickOutside(event: MouseEvent) {
@@ -139,14 +149,24 @@ const Dashboard = () => {
         setPresetDropdownOpen(false);
         setIsCreatingNewPreset(false);
       }
+      if (locationDropdownRef.current && !locationDropdownRef.current.contains(event.target as Node)) {
+        setShowLocationDropdown(false);
+      }
+      if (categoryDropdownRef.current && !categoryDropdownRef.current.contains(event.target as Node)) {
+        setShowCategoryDropdown(false);
+      }
+      if (trendDropdownRef.current && !trendDropdownRef.current.contains(event.target as Node)) {
+        setShowTrendDropdown(false);
+      }
+      if (variantDropdownRef.current && !variantDropdownRef.current.contains(event.target as Node)) {
+        setShowVariantDropdown(false);
+      }
     }
-    if (presetDropdownOpen) {
-      document.addEventListener("mousedown", handleClickOutside);
-    }
+    document.addEventListener("mousedown", handleClickOutside);
     return () => {
       document.removeEventListener("mousedown", handleClickOutside);
     };
-  }, [presetDropdownOpen, editingPresetId]);
+  }, [editingPresetId]);
 
   useEffect(() => {
     fetch('/api/presets')
@@ -1080,6 +1100,7 @@ const Dashboard = () => {
     setIsLoading(false);
     setIsBatching(false);
     setIsPreliminary(false);
+    setIsVariantFetching(false);
   };
 
   const getApiParams = useCallback(() => {
@@ -1304,6 +1325,7 @@ const Dashboard = () => {
 
         if (searchingMode === 'CATEGORY BASED') {
           // Frontend-driven category search orchestration
+          console.log(`[Category Search] Starting keyword generation for category: ${searchCategory} geo: ${searchLocation}`);
           setStatusMessage('GENERATING KEYWORDS...');
 
           const kwResponse = await fetch('/api/pipeline/generate-keywords', {
@@ -1326,6 +1348,7 @@ const Dashboard = () => {
 
           const kwData = await kwResponse.json();
           const generatedKeywords: string[] = kwData.keywords || [];
+          console.log(`[Category Search] Generated ${generatedKeywords.length} keywords.`);
 
           // Initialize UI with PENDING statuses
           const initialExecutions = generatedKeywords.map(kw => ({
@@ -1381,6 +1404,8 @@ const Dashboard = () => {
 
               if (cancelTokenRef.current) break;
 
+
+              console.log(`[Category Search] Triggering variant ${i + 1}/${generatedKeywords.length}: ${kw}`);
               setCategoryExecutions(prev => {
                 const next = [...prev];
                 next[i] = { ...next[i], status: 'STARTING', started_at: Date.now() };
@@ -1399,6 +1424,7 @@ const Dashboard = () => {
                 const triggerData = await triggerRes.json();
 
                 if (triggerRes.ok && triggerData.success) {
+                  console.log(`[Category Search] Successfully triggered ${kw}. ARN: ${triggerData.executionArn}`);
                   setCategoryExecutions(prev => {
                     const next = [...prev];
                     next[i] = {
@@ -1410,6 +1436,7 @@ const Dashboard = () => {
                     return next;
                   });
                 } else {
+                  console.error(`[Category Search] Failed to trigger ${kw}:`, triggerData.error);
                   setCategoryExecutions(prev => {
                     const next = [...prev];
                     next[i] = { ...next[i], status: 'FAILED' };
@@ -1417,7 +1444,7 @@ const Dashboard = () => {
                   });
                 }
               } catch (e) {
-                console.error(`Failed to trigger category child for ${kw}:`, e);
+                console.error(`[Category Search] Failed to trigger category child for ${kw}:`, e);
                 setCategoryExecutions(prev => {
                   const next = [...prev];
                   next[i] = { ...next[i], status: 'FAILED' };
@@ -1426,6 +1453,7 @@ const Dashboard = () => {
               }
               lastTriggerTime = Date.now();
             }
+            console.log(`[Category Search] Triggering loop finished.`);
             // Only transition to final state if the user has not cancelled in the meantime.
             if (!cancelTokenRef.current) {
               setIsBatching(false);
@@ -1609,10 +1637,21 @@ const Dashboard = () => {
     setHasLoadedTrends(false);
     setHasLoadedAmazon(false);
     setHasLoadedAlibaba(false);
+
     if (newValue !== 'ALL') {
-      setIsVariantFetching(true);
+      const exec = categoryExecutions.find(e => e.keyword === newValue);
+      const isTerminal = exec && ['FAILED', 'ABORTED', 'TIMED_OUT'].includes(exec.status || '');
+
+      // Only show loader if pipeline is logically "active" and this variant hasn't already failed
+      if ((pipelineStatus === 'POLLING' || pipelineStatus === 'COMPLETED') && !isTerminal) {
+        setIsVariantFetching(true);
+      } else {
+        setIsVariantFetching(false);
+      }
+    } else {
+      setIsVariantFetching(false);
     }
-  }, []);
+  }, [pipelineStatus, categoryExecutions]);
 
   // In category mode, when pipeline is completed (or polling), fetch that keyword's stage data
   useEffect(() => {
@@ -1734,39 +1773,67 @@ const Dashboard = () => {
             // Poll children every ~10s (every 3rd main poll roughly)
             if (childStatusCounter >= 3) {
               childStatusCounter = 0;
-              const updatedExecutions = await Promise.all(categoryExecutions.map(async (exec) => {
-                if (exec.status === 'SUCCEEDED' || exec.status === 'FAILED' || exec.status === 'ABORTED' || exec.status === 'TIMED_OUT') return exec;
+              // Use Ref to avoid stale closure during the fetch loop
+              const currentExecutions = categoryExecutionsRef.current;
+
+              const statusUpdates = await Promise.all(currentExecutions.map(async (exec) => {
+                if (exec.status === 'SUCCEEDED' || exec.status === 'FAILED' || exec.status === 'ABORTED' || exec.status === 'TIMED_OUT') return null;
 
                 // Check for frontend timeout (e.g., 5 minutes)
                 const now = Date.now();
                 if (exec.started_at && (now - exec.started_at > 5 * 60 * 1000) && (exec.status === 'RUNNING' || exec.status === 'STARTING')) {
                   console.warn(`Execution for ${exec.keyword} timed out after 5 minutes.`);
-                  return { ...exec, status: 'TIMED_OUT' };
+                  return { keyword: exec.keyword, status: 'TIMED_OUT' };
                 }
 
                 // Ignore ones that haven't been assigned an ARN yet
-                if (exec.status === 'PENDING' || exec.status === 'STARTING' || !exec.execution_arn) return exec;
+                if (exec.status === 'PENDING' || exec.status === 'STARTING' || !exec.execution_arn) return null;
 
                 try {
                   const res = await fetch(`/api/pipeline/status?arn=${exec.execution_arn}`);
                   const data = await res.json();
-                  return { ...exec, status: data.status || exec.status };
+                  if (data.status && data.status !== exec.status) {
+                    return { keyword: exec.keyword, status: data.status };
+                  }
+                  return null;
                 } catch (e) {
                   console.error(`Error fetching status for child ${exec.keyword}:`, e);
-                  return exec;
+                  return null;
                 }
               }));
 
-              setCategoryExecutions(updatedExecutions);
+              // Apply updates using functional set to avoid overwriting triggered variants
+              const validUpdates = statusUpdates.filter((u): u is { keyword: string, status: string } => u !== null);
 
-              // Check if all children are finished
-              const allFinished = updatedExecutions.every(e =>
+              if (validUpdates.length > 0) {
+                setCategoryExecutions(prev => {
+                  const next = [...prev];
+                  let changed = false;
+                  validUpdates.forEach(update => {
+                    const idx = next.findIndex(e => e.keyword === update.keyword);
+                    if (idx !== -1 && next[idx].status !== update.status) {
+                      next[idx] = { ...next[idx], status: update.status };
+                      changed = true;
+                    }
+                  });
+                  return changed ? next : prev;
+                });
+              }
+
+              // Evaluate allFinished based on the LATEST state (using Ref after the set is batched or recalculated)
+              // Since setCategoryExecutions is async, we check the locally derived current state plus our validUpdates
+              const finalExecutions = currentExecutions.map(exec => {
+                const update = validUpdates.find(u => u.keyword === exec.keyword);
+                return update ? { ...exec, status: update.status } : exec;
+              });
+
+              const allFinished = finalExecutions.every(e =>
                 e.status === 'SUCCEEDED' || e.status === 'FAILED' || e.status === 'ABORTED' || e.status === 'TIMED_OUT'
               );
 
               if (allFinished) {
                 currentStatus = 'SUCCEEDED';
-                const firstExec = updatedExecutions[0];
+                const firstExec = finalExecutions[0];
                 categoryFirstArnWhenFinished = firstExec?.execution_arn ?? null;
                 const firstKeyword = firstExec?.keyword;
                 if (firstKeyword) setSelectedCategoryVariant(firstKeyword);
@@ -1921,60 +1988,85 @@ const Dashboard = () => {
   }
 
   return (
-    <div className="min-h-screen bg-[#1a2318] text-white p-4 md:p-8">
+    <div className="min-h-screen bg-[#1a2318] text-white p-4 md:p-8 selection:bg-[#F3940B]/30">
       {/* Header */}
-      <div className="text-center mb-10">
-        <h1 className="text-3xl md:text-4xl font-bold tracking-[0.25em] text-white drop-shadow-lg">TREND RADAR</h1>
-        <div className="mt-2 h-0.5 w-24 bg-[#F3940B] mx-auto rounded-full opacity-80"></div>
+      <div className="text-center mb-12">
+        <h1 className="text-4xl md:text-5xl font-extrabold tracking-[0.3em] text-white drop-shadow-2xl opacity-90">
+          TREND <span className="text-[#F3940B]">RADAR</span>
+        </h1>
+        <div className="mt-3 h-1 w-32 bg-gradient-to-r from-transparent via-[#F3940B] to-transparent mx-auto rounded-full shadow-[0_0_15px_rgba(243,148,11,0.5)]"></div>
       </div>
 
       {/* Main Content */}
       <div className="max-w-7xl mx-auto">
         {/* Top Row: Searching Filters, Location, Active Search */}
-        <div className="grid grid-cols-1 lg:grid-cols-3 gap-6 mb-8 items-center">
+        <div className="grid grid-cols-1 lg:grid-cols-3 gap-6 mb-8 items-center relative z-[100]">
           {/* Left: Searching Filters */}
           <div>
-            <div className="border border-white/40 bg-white/5 px-4 py-3 rounded-lg backdrop-blur-sm">
+            <div className="border border-white/10 bg-white/5 px-6 py-3 rounded-full backdrop-blur-md shadow-xl transition-all focus-within:ring-2 focus-within:ring-[#F3940B]/30 h-11 flex items-center">
               <input
                 type="text"
                 value={searchingFilters}
                 disabled={fieldsDisabled}
                 onChange={(e) => setSearchingFilters(e.target.value)}
-                placeholder="SEARCHING FILTERS:"
-                className={`w-full h-10 text-white text-base bg-transparent border-none outline-none placeholder-gray-400 font-semibold tracking-widest ${fieldsDisabled ? 'opacity-50 cursor-not-allowed' : ''}`}
+                placeholder="SEARCHING FILTERS..."
+                className={`w-full text-white text-sm bg-transparent border-none outline-none placeholder-gray-500 font-bold tracking-[0.15em] ${fieldsDisabled ? 'opacity-50 cursor-not-allowed' : ''}`}
               />
             </div>
           </div>
 
           {/* Center: Location */}
-          <div className="flex flex-col items-center justify-center gap-2">
-            <div className="flex items-center gap-4">
-              <label className="text-xs font-bold tracking-widest text-gray-300 uppercase flex items-center">
-                LOCATION: <span className="text-[#F3940B] ml-0.5">*</span>
-              </label>
-              <select
-                value={location}
+          <div className="flex items-center justify-center gap-4">
+            <label className="text-[10px] font-bold tracking-[0.2em] text-gray-400 uppercase flex items-center whitespace-nowrap">
+              LOCATION <span className="text-[#F3940B] ml-0.5">*</span>
+            </label>
+            <div className="relative w-full max-w-[220px]" ref={locationDropdownRef}>
+              <button
+                onClick={() => !fieldsDisabled && setShowLocationDropdown(!showLocationDropdown)}
                 disabled={fieldsDisabled}
-                onChange={(e) => {
-                  setLocation(e.target.value);
-                  if (locationError) {
-                    setLocationError('');
-                  }
-                }}
-                className={`px-4 py-2 text-white bg-[#2a3828] border rounded-lg focus:outline-none focus:border-[#F3940B] transition-colors ${locationError ? 'border-red-500' : 'border-white/40'
+                className={`w-full px-5 py-2.5 h-11 text-sm text-white bg-white/10 border backdrop-blur-sm rounded-full focus:outline-none focus:ring-2 focus:ring-[#F3940B]/50 transition-all flex items-center justify-between ${locationError ? 'border-red-500' : 'border-white/10 hover:border-white/30'
                   } ${fieldsDisabled ? 'opacity-50 cursor-not-allowed' : ''}`}
               >
-                <option value="">Select a country</option>
-                {countries.map((country) => (
-                  <option key={country.code} value={country.name}>
-                    {country.name}
-                  </option>
-                ))}
-              </select>
+                <span className="truncate">{location || 'Select a country'}</span>
+                <svg className={`w-4 h-4 text-gray-500 transition-transform duration-200 ${showLocationDropdown ? 'rotate-180' : ''}`} fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M19 9l-7 7-7-7" />
+                </svg>
+              </button>
+
+              {showLocationDropdown && (
+                <div className="absolute top-full left-0 mt-2 w-full bg-[#1a2318] border border-white/10 rounded-2xl shadow-2xl z-[110] overflow-hidden backdrop-blur-xl animate-in fade-in slide-in-from-top-2 duration-200">
+                  <div className="p-2 border-b border-white/5">
+                    <input
+                      type="text"
+                      value={locationSearch}
+                      onChange={(e) => setLocationSearch(e.target.value)}
+                      placeholder="Search country..."
+                      className="w-full bg-white/5 border border-white/10 rounded-full px-4 py-1.5 text-xs text-white focus:outline-none focus:ring-1 focus:ring-[#F3940B]/30"
+                    />
+                  </div>
+                  <div className="max-h-60 overflow-y-auto py-1 custom-scrollbar">
+                    {countries.filter(c => c.name.toLowerCase().includes(locationSearch.toLowerCase())).map((country) => (
+                      <button
+                        key={country.code}
+                        onClick={() => {
+                          setLocation(country.name);
+                          setShowLocationDropdown(false);
+                          setLocationSearch('');
+                          if (locationError) setLocationError('');
+                        }}
+                        className={`w-full px-5 py-2.5 text-left text-sm transition-colors hover:bg-[#F3940B]/10 ${location === country.name ? 'text-[#F3940B] bg-[#F3940B]/5' : 'text-gray-300'}`}
+                      >
+                        {country.name}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              )}
+
+              {locationError && (
+                <p className="absolute -bottom-5 left-4 text-red-500 text-[10px] whitespace-nowrap">{locationError}</p>
+              )}
             </div>
-            {locationError && (
-              <p className="text-red-400 text-xs">{locationError}</p>
-            )}
           </div>
 
           {/* Right: Active Search */}
@@ -1994,14 +2086,13 @@ const Dashboard = () => {
           </div>
         </div>
 
-        {/* Combined Row: Searching Mode + Search Fields (Left) and Blacklisted Words (Right) */}
-        <div className="bg-[#243022] border border-white/10 rounded-xl p-6 mb-6 shadow-xl">
-          <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-            {/* Left: Searching Mode + Search Fields in 2x2 grid */}
-            <div className="lg:col-span-2 space-y-5">
-              {/* Searching Mode - All in one line */}
-              <div className="flex items-center gap-5 flex-wrap">
-                <span className="text-xs font-bold tracking-widest text-gray-400 uppercase">SEARCHING MODE:</span>
+        {/* Combined Row: Searching Mode + Search Fields and Blacklisted Words */}
+        <div className="bg-white/5 backdrop-blur-md border border-white/10 rounded-2xl p-8 mb-6 shadow-2xl relative z-[80]">
+          <div className="flex flex-col gap-8">
+            {/* Searching Mode - All in one line */}
+            <div className="flex items-center gap-6 flex-wrap pb-6 border-b border-white/5">
+              <span className="text-[10px] font-black tracking-[0.2em] text-gray-500 uppercase">SEARCHING MODE</span>
+              <div className="flex gap-3">
                 {['MANUAL', 'CATEGORY BASED', 'ATAI AUTO'].map((mode) => (
                   <label key={mode} className={`flex items-center gap-2 ${fieldsDisabled ? 'cursor-not-allowed' : 'cursor-pointer'}`}>
                     <input
@@ -2013,22 +2104,24 @@ const Dashboard = () => {
                       onChange={(e) => {
                         if (!fieldsDisabled) setSearchingMode(e.target.value);
                       }}
-                      style={{ accentColor: '#F3940B' }}
-                      className={fieldsDisabled ? "pointer-events-none" : ""}
+                      className="hidden"
                     />
-                    <span className={`px-3 py-1 text-xs font-bold tracking-wider rounded-full border transition-all ${searchingMode === mode
-                      ? 'bg-[#F3940B] border-[#F3940B] text-black ' + (fieldsDisabled ? '' : 'shadow-lg shadow-orange-900/40')
-                      : 'border-white/30 text-gray-300 ' + (fieldsDisabled ? '' : 'hover:border-white/60 hover:text-white')
-                      } ${(fieldsDisabled && searchingMode !== mode) ? 'opacity-50' : ''}`}>{mode}</span>
+                    <span className={`px-5 py-2 text-[10px] font-black tracking-wider rounded-full border transition-all duration-300 ${searchingMode === mode
+                      ? 'bg-[#F3940B] border-[#F3940B] text-black shadow-lg shadow-orange-900/40'
+                      : 'border-white/10 text-gray-500 hover:border-white/30 hover:text-gray-300 hover:bg-white/5'
+                      } ${fieldsDisabled && searchingMode !== mode ? 'opacity-50' : ''}`}>{mode}</span>
                   </label>
                 ))}
               </div>
+            </div>
 
-              {/* Search Fields in 2x2 grid */}
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-5">
+            {/* Inputs Grid: Standard Search Parameters */}
+            <div className="grid grid-cols-1 lg:grid-cols-2 gap-x-12 gap-y-6">
+              {/* Left Column */}
+              <div className="space-y-6">
                 {searchingMode === 'MANUAL' ? (
                   <div>
-                    <label className="block text-xs font-bold tracking-widest text-gray-400 uppercase mb-2 flex items-center">
+                    <label className="block text-[10px] font-extrabold tracking-[0.15em] text-gray-500 uppercase mb-2 flex items-center">
                       KEYWORD SEARCH <span className="text-[#F3940B] ml-0.5">*</span>
                     </label>
                     <input
@@ -2037,157 +2130,189 @@ const Dashboard = () => {
                       disabled={fieldsDisabled}
                       onChange={(e) => {
                         setKeywordSearch(e.target.value);
-                        if (keywordSearchError) {
-                          setKeywordSearchError('');
-                        }
+                        if (keywordSearchError) setKeywordSearchError('');
                       }}
-                      className={`w-full px-4 py-2.5 text-black bg-white border rounded-lg focus:outline-none focus:ring-2 focus:ring-[#F3940B]/40 ${keywordSearchError ? 'border-red-500' : 'border-gray-300'
+                      placeholder="Enter search keyword..."
+                      className={`w-full px-5 py-2.5 h-11 text-sm text-white bg-white/10 border backdrop-blur-sm rounded-full focus:outline-none focus:ring-2 focus:ring-[#F3940B]/50 transition-all ${keywordSearchError ? 'border-red-500' : 'border-white/10 hover:border-white/30'
                         } ${fieldsDisabled ? 'opacity-50 cursor-not-allowed' : ''}`}
                     />
                     {keywordSearchError && (
-                      <p className="text-red-400 text-xs mt-1">{keywordSearchError}</p>
+                      <p className="text-red-400 text-[10px] mt-1">{keywordSearchError}</p>
                     )}
                   </div>
                 ) : (
                   <div className="flex flex-col gap-2">
-                    <label className="text-xs font-bold tracking-widest text-gray-400 uppercase">PRODUCT CATEGORY <span className="text-[#F3940B]">*</span></label>
-                    <select
-                      value={productCategory}
-                      disabled={fieldsDisabled}
-                      onChange={(e) => setProductCategory(e.target.value)}
-                      className={`w-full px-4 py-2.5 text-black bg-white border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-[#F3940B]/40 ${fieldsDisabled ? 'opacity-50 cursor-not-allowed' : ''}`}
-                    >
-                      {GT_CATEGORIES.map((cat) => (
-                        <option key={cat} value={cat}>{cat}</option>
-                      ))}
-                    </select>
-                  </div>
-                )}
-                {/* Trend Period - only show when Active Search is ON */}
-                {activeSearch && (
-                  <div className="flex flex-col items-start gap-2 relative">
-                    <div className="flex items-center gap-4 flex-col">
-                      <span className="text-xs font-bold tracking-widest text-gray-400 uppercase flex items-center">
-                        TREND PERIOD <span className="text-[#F3940B] ml-0.5">*</span>
-                        {pipelineFieldsDisabled && <InfoButton message="Please reset in order to apply filters for new search" />}
-                      </span>
-                      <div className="relative trend-dropdown">
-                        <button
-                          onClick={() => !pipelineFieldsDisabled && setShowTrendDropdown(!showTrendDropdown)}
-                          disabled={pipelineFieldsDisabled}
-                          className={`px-4 py-2.5 text-black bg-white border rounded-lg focus:outline-none focus:ring-2 focus:ring-[#F3940B]/40 min-w-[150px] flex items-center justify-between ${trendPeriodError ? 'border-red-500' : 'border-gray-300'
-                            } ${pipelineFieldsDisabled ? 'opacity-50 cursor-not-allowed' : ''}`}
-                        >
-                          <span>{trendPeriod || 'Select period'}</span>
-                          <span className="ml-2">▼</span>
-                        </button>
-                        {showTrendDropdown && (
-                          <div className="absolute top-full left-0 mt-1 w-full bg-white border border-gray-300 shadow-lg z-50 max-h-48 overflow-y-auto">
-                            {Array.from({ length: 12 }, (_, i) => i + 1).map((period) => (
+                    <label className="text-[10px] font-extrabold tracking-[0.15em] text-gray-500 uppercase">PRODUCT CATEGORY <span className="text-[#F3940B]">*</span></label>
+                    <div className="relative" ref={categoryDropdownRef}>
+                      <button
+                        onClick={() => !fieldsDisabled && setShowCategoryDropdown(!showCategoryDropdown)}
+                        disabled={fieldsDisabled}
+                        className={`w-full px-5 py-2.5 h-11 text-sm text-white bg-white/10 border backdrop-blur-sm rounded-full focus:outline-none focus:ring-2 focus:ring-[#F3940B]/50 transition-all flex items-center justify-between border-white/10 hover:border-white/30 ${fieldsDisabled ? 'opacity-50 cursor-not-allowed' : ''}`}
+                      >
+                        <span className="truncate">{productCategory}</span>
+                        <svg className={`w-4 h-4 text-gray-500 transition-transform duration-200 ${showCategoryDropdown ? 'rotate-180' : ''}`} fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M19 9l-7 7-7-7" />
+                        </svg>
+                      </button>
+                      {showCategoryDropdown && (
+                        <div className="absolute top-full left-0 mt-2 w-full bg-[#1a2318] border border-white/10 rounded-2xl shadow-2xl z-[90] overflow-hidden backdrop-blur-xl animate-in fade-in slide-in-from-top-2 duration-200">
+                          <div className="p-2 border-b border-white/5">
+                            <input
+                              type="text"
+                              value={categorySearch}
+                              onChange={(e) => setCategorySearch(e.target.value)}
+                              placeholder="Search category..."
+                              className="w-full bg-white/5 border border-white/10 rounded-full px-4 py-1.5 text-xs text-white focus:outline-none focus:ring-1 focus:ring-[#F3940B]/30"
+                            />
+                          </div>
+                          <div className="max-h-60 overflow-y-auto py-1 custom-scrollbar">
+                            {GT_CATEGORIES.filter(cat => cat.toLowerCase().includes(categorySearch.toLowerCase())).map((cat) => (
                               <button
-                                key={period}
+                                key={cat}
                                 onClick={() => {
-                                  setTrendPeriod(period.toString());
-                                  setShowTrendDropdown(false);
-                                  if (trendPeriodError) {
-                                    setTrendPeriodError('');
-                                  }
+                                  setProductCategory(cat);
+                                  setShowCategoryDropdown(false);
+                                  setCategorySearch('');
                                 }}
-                                className="w-full px-3 py-2 text-left text-black hover:bg-gray-100 focus:outline-none focus:bg-gray-100"
+                                className={`w-full px-5 py-2.5 text-left text-sm transition-colors hover:bg-[#F3940B]/10 ${productCategory === cat ? 'text-[#F3940B] bg-[#F3940B]/5' : 'text-gray-300'}`}
                               >
-                                {period}
+                                {cat}
                               </button>
                             ))}
                           </div>
-                        )}
-                      </div>
+                        </div>
+                      )}
                     </div>
-                    {trendPeriodError && (
-                      <p className="text-red-400 text-xs ml-28">{trendPeriodError}</p>
-                    )}
                   </div>
                 )}
 
-                {/* VARIANT LIMIT MAX and RESULTS CAP MAX - only show when Active Search is ON */}
                 {activeSearch && (
-                  <>
-                    <div>
-                      <label className="block text-xs font-bold tracking-widest text-gray-400 uppercase mb-2 flex items-center">
-                        VARIANT LIMIT MAX <span className="text-[#F3940B] ml-0.5">*</span>
-                        {pipelineFieldsDisabled && <InfoButton message="Please reset in order to apply filters for new search" />}
-                      </label>
-                      <input
-                        type="text"
-                        value={variantLimitMax}
-                        disabled={pipelineFieldsDisabled}
-                        onChange={(e) => {
-                          const val = e.target.value;
-                          setVariantLimitMax(val);
-                          if (!val.trim()) {
-                            setVariantLimitMaxError('Variant Limit Max is required');
-                          } else {
-                            const parsed = parseInt(val.trim(), 10);
-                            if (isNaN(parsed) || parsed <= 0) {
-                              setVariantLimitMaxError('Must be greater than 0');
-                            } else if (parsed > 30) {
-                              setVariantLimitMaxError('Limit max to 30 to prevent Google Trends rate limiting');
-                            } else if (variantLimitMaxError) {
-                              setVariantLimitMaxError('');
-                            }
+                  <div>
+                    <label className="block text-[10px] font-extrabold tracking-[0.15em] text-gray-500 uppercase mb-2 flex items-center">
+                      VARIANT LIMIT MAX <span className="text-[#F3940B] ml-0.5">*</span>
+                      {pipelineFieldsDisabled && <InfoButton message="Please reset in order to apply filters for new search" />}
+                    </label>
+                    <input
+                      type="text"
+                      value={variantLimitMax}
+                      disabled={pipelineFieldsDisabled}
+                      onChange={(e) => {
+                        const val = e.target.value;
+                        setVariantLimitMax(val);
+                        if (!val.trim()) {
+                          setVariantLimitMaxError('Variant Limit Max is required');
+                        } else {
+                          const parsed = parseInt(val.trim(), 10);
+                          if (isNaN(parsed) || parsed <= 0) {
+                            setVariantLimitMaxError('Must be greater than 0');
+                          } else if (parsed > 30) {
+                            setVariantLimitMaxError('Limit max to 30 to prevent Google Trends rate limiting');
+                          } else if (variantLimitMaxError) {
+                            setVariantLimitMaxError('');
                           }
-                        }}
-                        className={`w-full px-4 py-2.5 text-black bg-white border rounded-lg focus:outline-none focus:ring-2 focus:ring-[#F3940B]/40 ${variantLimitMaxError ? 'border-red-500' : 'border-gray-300'
+                        }
+                      }}
+                      placeholder="Max variants..."
+                      className={`w-full px-5 py-2.5 h-11 text-sm text-white bg-white/10 border backdrop-blur-sm rounded-full focus:outline-none focus:ring-2 focus:ring-[#F3940B]/50 transition-all ${variantLimitMaxError ? 'border-red-500' : 'border-white/10 hover:border-white/30'
+                        } ${pipelineFieldsDisabled ? 'opacity-50 cursor-not-allowed' : ''}`}
+                    />
+                    {variantLimitMaxError && (
+                      <p className="text-red-400 text-[10px] mt-1">{variantLimitMaxError}</p>
+                    )}
+                  </div>
+                )}
+              </div>
+
+              {/* Right Column */}
+              <div className="space-y-6">
+                {activeSearch && (
+                  <div className="flex flex-col gap-2">
+                    <span className="text-[10px] font-extrabold tracking-[0.15em] text-gray-500 uppercase flex items-center">
+                      TREND PERIOD <span className="text-[#F3940B] ml-0.5">*</span>
+                      {pipelineFieldsDisabled && <InfoButton message="Please reset in order to apply filters for new search" />}
+                    </span>
+                    <div className="relative trend-dropdown w-full" ref={trendDropdownRef}>
+                      <button
+                        onClick={() => !pipelineFieldsDisabled && setShowTrendDropdown(!showTrendDropdown)}
+                        disabled={pipelineFieldsDisabled}
+                        className={`w-full px-5 py-2.5 h-11 text-sm text-white bg-white/10 border backdrop-blur-sm rounded-full focus:outline-none focus:ring-2 focus:ring-[#F3940B]/50 flex items-center justify-between transition-all ${trendPeriodError ? 'border-red-500' : 'border-white/10 hover:border-white/30'
                           } ${pipelineFieldsDisabled ? 'opacity-50 cursor-not-allowed' : ''}`}
-                      />
-                      {variantLimitMaxError && (
-                        <p className="text-red-400 text-xs mt-1">{variantLimitMaxError}</p>
+                      >
+                        <span className="opacity-90">{trendPeriod ? `${trendPeriod} Months` : 'Select period'}</span>
+                        <svg className={`w-4 h-4 text-gray-500 transition-transform duration-200 ${showTrendDropdown ? 'rotate-180' : ''}`} fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M19 9l-7 7-7-7" />
+                        </svg>
+                      </button>
+                      {showTrendDropdown && (
+                        <div className="absolute top-full left-0 mt-2 w-full bg-[#1a2318] border border-white/10 rounded-2xl shadow-2xl z-[90] max-h-48 overflow-y-auto backdrop-blur-xl animate-in fade-in slide-in-from-top-2 duration-200 custom-scrollbar">
+                          {Array.from({ length: 12 }, (_, i) => i + 1).map((period) => (
+                            <button
+                              key={period}
+                              onClick={() => {
+                                setTrendPeriod(period.toString());
+                                setShowTrendDropdown(false);
+                                if (trendPeriodError) setTrendPeriodError('');
+                              }}
+                              className="w-full px-5 py-3 text-left text-sm text-white hover:bg-[#F3940B]/10 transition-colors"
+                            >
+                              {period} Months
+                            </button>
+                          ))}
+                        </div>
+                      )}
+                      {trendPeriodError && (
+                        <p className="absolute -bottom-5 left-4 text-red-500 text-[10px] whitespace-nowrap">{trendPeriodError}</p>
                       )}
                     </div>
-                    <div>
-                      <label className="block text-xs font-bold tracking-widest text-gray-400 uppercase mb-2 flex items-center">
-                        RESULTS CAP MAX <span className="text-[#F3940B] ml-0.5">*</span>
-                        {pipelineFieldsDisabled && <InfoButton message="Please reset in order to apply filters for new search" />}
-                      </label>
-                      <input
-                        type="text"
-                        value={resultsCap}
-                        disabled={pipelineFieldsDisabled}
-                        onChange={(e) => {
-                          const val = e.target.value;
-                          setResultsCap(val);
-                          if (!val.trim()) {
-                            setResultsCapError('Results Cap Max is required');
-                          } else {
-                            const parsed = parseInt(val.trim(), 10);
-                            if (isNaN(parsed) || parsed <= 0) {
-                              setResultsCapError('Must be greater than 0');
-                            } else if (resultsCapError) {
-                              setResultsCapError('');
-                            }
+                  </div>
+                )}
+
+                {activeSearch && (
+                  <div>
+                    <label className="block text-[10px] font-extrabold tracking-[0.15em] text-gray-500 uppercase mb-2 flex items-center">
+                      RESULTS CAP MAX <span className="text-[#F3940B] ml-0.5">*</span>
+                      {pipelineFieldsDisabled && <InfoButton message="Please reset in order to apply filters for new search" />}
+                    </label>
+                    <input
+                      type="text"
+                      value={resultsCap}
+                      disabled={pipelineFieldsDisabled}
+                      onChange={(e) => {
+                        const val = e.target.value;
+                        setResultsCap(val);
+                        if (!val.trim()) {
+                          setResultsCapError('Results Cap Max is required');
+                        } else {
+                          const parsed = parseInt(val.trim(), 10);
+                          if (isNaN(parsed) || parsed <= 0) {
+                            setResultsCapError('Must be greater than 0');
+                          } else if (resultsCapError) {
+                            setResultsCapError('');
                           }
-                        }}
-                        className={`w-full px-4 py-2.5 text-black bg-white border rounded-lg focus:outline-none focus:ring-2 focus:ring-[#F3940B]/40 ${resultsCapError ? 'border-red-500' : 'border-gray-300'
-                          } ${pipelineFieldsDisabled ? 'opacity-50 cursor-not-allowed' : ''}`}
-                      />
-                      {resultsCapError && (
-                        <p className="text-red-400 text-xs mt-1">{resultsCapError}</p>
-                      )}
-                    </div>
-                  </>
+                        }
+                      }}
+                      placeholder="Enter results cap..."
+                      className={`w-full px-5 py-2.5 h-11 text-sm text-white bg-white/10 border backdrop-blur-sm rounded-full focus:outline-none focus:ring-2 focus:ring-[#F3940B]/50 transition-all ${resultsCapError ? 'border-red-500' : 'border-white/10 hover:border-white/30'
+                        } ${pipelineFieldsDisabled ? 'opacity-50 cursor-not-allowed' : ''}`}
+                    />
+                    {resultsCapError && (
+                      <p className="text-red-400 text-[10px] mt-1">{resultsCapError}</p>
+                    )}
+                  </div>
                 )}
               </div>
             </div>
 
-            {/* Right: Blacklisted Words */}
-            <div>
-              <label className="block text-xs font-bold tracking-widest text-gray-400 uppercase mb-2">BLACKLISTED WORDS</label>
+            {/* Bottom Row: Blacklisted Words (Aligns with left column) */}
+            <div className="pt-6 border-t border-white/5">
+              <label className="block text-[10px] font-extrabold tracking-[0.15em] text-gray-500 uppercase mb-3">BLACKLISTED WORDS</label>
               <div
-                className="flex flex-col w-full h-32 bg-[#FFFFFF] border border-gray-600 focus-within:border-blue-500 overflow-hidden cursor-text"
+                className="flex flex-col w-full min-h-[100px] bg-white/5 border border-white/10 rounded-2xl focus-within:ring-2 focus-within:ring-[#F3940B]/30 overflow-hidden cursor-text transition-all backdrop-blur-sm"
                 onClick={() => document.getElementById('blacklist-input')?.focus()}
               >
-                <div className="flex flex-wrap gap-2 p-2 overflow-y-auto w-full h-full content-start">
+                <div className="flex flex-wrap gap-2 p-4 overflow-y-auto w-full h-full content-start">
                   {blacklistedWords.map((word, index) => (
-                    <div key={index} className="flex items-center gap-1 bg-gray-200 text-black px-2 py-1 rounded-md text-sm border border-gray-300 shadow-sm leading-none shrink-0">
+                    <div key={index} className="flex items-center gap-2 bg-[#F3940B]/10 text-white px-4 py-2 rounded-full text-xs font-bold border border-[#F3940B]/20 shadow-sm leading-none shrink-0 transition-all hover:bg-[#F3940B]/20">
                       <span className="max-w-[150px] truncate" title={word}>{word}</span>
                       <button
                         onClick={(e) => {
@@ -2195,7 +2320,7 @@ const Dashboard = () => {
                           e.stopPropagation();
                           setBlacklistedWords(prev => prev.filter((_, i) => i !== index));
                         }}
-                        className={`text-gray-500 hover:text-red-500 rounded-full w-4 h-4 flex items-center justify-center font-bold text-lg leading-none shrink-0 pb-1 ${fieldsDisabled ? 'opacity-30 cursor-not-allowed' : ''}`}
+                        className={`text-gray-400 hover:text-red-400 rounded-full w-4 h-4 flex items-center justify-center font-bold text-base leading-none shrink-0 transition-colors ${fieldsDisabled ? 'opacity-30 cursor-not-allowed' : ''}`}
                         title="Remove word"
                       >
                         &times;
@@ -2228,20 +2353,18 @@ const Dashboard = () => {
                           setBlacklistInput('');
                         }
                       } else if (e.key === 'Backspace' && blacklistInput === '' && blacklistedWords.length > 0) {
-                        // Remove the last chip if backspace is pressed on empty input
                         setBlacklistedWords(prev => prev.slice(0, -1));
                       }
                     }}
                     onBlur={() => {
-                      // Automatically convert any leftover text into a chip when clicking away
                       const val = blacklistInput.trim();
                       if (val) {
                         setBlacklistedWords(prev => prev.includes(val) ? prev : [...prev, val]);
                         setBlacklistInput('');
                       }
                     }}
-                    placeholder={blacklistedWords.length === 0 ? "Type and press Enter or comma..." : ""}
-                    className="flex-1 min-w-[120px] bg-transparent outline-none text-black text-sm h-7"
+                    placeholder={blacklistedWords.length === 0 ? "Type word and press Enter..." : "Add more..."}
+                    className="flex-1 min-w-[200px] bg-transparent outline-none text-white text-sm h-8"
                   />
                 </div>
               </div>
@@ -2250,23 +2373,23 @@ const Dashboard = () => {
         </div>
 
         {/* Fourth Row: Google Trend Score, KWP Monthly Searches */}
-        <div className="bg-[#243022] border border-white/10 rounded-xl px-6 py-5 mb-6 shadow-lg">
+        <div className="bg-white/5 backdrop-blur-md border border-white/10 rounded-2xl px-6 py-6 mb-6 shadow-2xl transition-all relative z-[60]">
           <div className="flex flex-wrap items-center gap-8 lg:gap-14">
             {/* Google Trend Score */}
-            <div className="flex items-center gap-4">
+            <div className="flex flex-col gap-6">
               <span className="text-xs font-bold tracking-widest text-gray-400 uppercase">GOOGLE TREND SCORE</span>
-              <div className="h-5 flex items-center bg-white px-3 py-2 ">
-                <svg width="20" height="12" viewBox="0 0 20 12" className="mr-2">
+              <div className="h-6 flex items-center bg-white/10 px-4 py-2 rounded-full border border-white/10 backdrop-blur-sm">
+                <svg width="20" height="12" viewBox="0 0 20 12" className="mr-3">
                   {/* Google Trends icon */}
-                  <path d="M2 10 L6 6 L10 8 L18 2" stroke="#4285f4" strokeWidth="2" fill="none" strokeLinecap="round" strokeLinejoin="round" />
+                  <path d="M2 10 L6 6 L10 8 L18 2" stroke="#F3940B" strokeWidth="2" fill="none" strokeLinecap="round" strokeLinejoin="round" />
                   <circle cx="2" cy="10" r="2" fill="#34a853" />
                   <circle cx="6" cy="6" r="2" fill="#fbbc04" />
                   <circle cx="10" cy="8" r="2" fill="#ea4335" />
                   <circle cx="18" cy="2" r="2" fill="#4285f4" />
                 </svg>
-                <div className="flex items-center gap-2">
-                  <span className="text-xs text-gray-800">0</span>
-                  <div className="relative w-20">
+                <div className="flex items-center gap-3">
+                  <span className="text-[10px] text-gray-400 font-bold">0</span>
+                  <div className="relative w-24">
                     <input
                       type="range"
                       min="0"
@@ -2274,9 +2397,9 @@ const Dashboard = () => {
                       value={googleTrendScore}
                       disabled={fieldsDisabled}
                       onChange={(e) => setGoogleTrendScore(Number(e.target.value))}
-                      className={`w-full h-2 bg-gray-300 rounded-full appearance-none ${fieldsDisabled ? 'cursor-not-allowed' : 'cursor-pointer'}`}
+                      className={`w-full h-1.5 bg-white/20 rounded-full appearance-none ${fieldsDisabled ? 'cursor-not-allowed' : 'cursor-pointer'}`}
                       style={{
-                        background: `linear-gradient(to right, #10b981 0%, #10b981 ${googleTrendScore}%, #d1d5db ${googleTrendScore}%, #d1d5db 100%)`,
+                        background: `linear-gradient(to right, #F3940B 0%, #F3940B ${googleTrendScore}%, rgba(255,255,255,0.1) ${googleTrendScore}%, rgba(255,255,255,0.1) 100%)`,
                         WebkitAppearance: 'none',
                         outline: 'none'
                       }}
@@ -2284,37 +2407,37 @@ const Dashboard = () => {
                     <style jsx>{`
                     input[type="range"]::-webkit-slider-thumb {
                       appearance: none;
-                      width: 14px;
-                      height: 14px;
+                      width: 12px;
+                      height: 12px;
                       border-radius: 50%;
-                      background: #2563eb;
+                      background: #F3940B;
                       cursor: pointer;
-                      border: none;
-                      box-shadow: 0 2px 4px rgba(0,0,0,0.2);
+                      border: 2px solid white;
+                      box-shadow: 0 0 10px rgba(243, 148, 11, 0.5);
                     }
                     
                     input[type="range"]::-moz-range-thumb {
-                      width: 14px;
-                      height: 14px;
+                      width: 12px;
+                      height: 12px;
                       border-radius: 50%;
-                      background: #2563eb;
+                      background: #F3940B;
                       cursor: pointer;
-                      border: none;
-                      box-shadow: 0 2px 4px rgba(0,0,0,0.2);
+                      border: 2px solid white;
+                      box-shadow: 0 0 10px rgba(243, 148, 11, 0.5);
                     }
                   `}</style>
                   </div>
-                  <span className="text-xs font-medium text-gray-800 min-w-[2.5rem] text-right">
+                  <span className="text-xs font-bold text-[#F3940B] min-w-[2rem] text-right">
                     {googleTrendScore}
                   </span>
                 </div>
               </div>
             </div>
-            <div>
-              <label className="block text-xs font-bold tracking-widest text-gray-400 uppercase mb-2">KWP MONTHLY SEARCHES</label>
-              <div className="flex items-center gap-2">
-                <div className="flex flex-col items-start gap-1 flex-1">
-                  <span className="text-xs text-gray-300">MIN</span>
+            <div className="flex-1">
+              <label className="block text-[10px] font-extrabold tracking-[0.15em] text-gray-500 uppercase mb-3">KWP MONTHLY SEARCHES</label>
+              <div className="flex items-center gap-3">
+                <div className="flex items-center gap-2 flex-1 h-11 bg-white/10 border border-white/10 rounded-full px-4 focus-within:ring-2 focus-within:ring-[#F3940B]/30 transition-all">
+                  <span className="text-[10px] font-black text-gray-400 uppercase">MIN</span>
                   <input
                     type="number"
                     min="0"
@@ -2322,12 +2445,12 @@ const Dashboard = () => {
                     disabled={fieldsDisabled}
                     onChange={(e) => setKwpMinSearches(e.target.value)}
                     placeholder="e.g. 1000"
-                    className={`w-full px-3 py-2 text-black bg-[#FFFFFF] border border-gray-600 focus:outline-none focus:border-blue-500 ${fieldsDisabled ? 'opacity-50 cursor-not-allowed' : ''}`}
+                    className="w-full bg-transparent border-none outline-none text-white text-sm"
                   />
                 </div>
-                <span className="text-gray-300 mt-5">–</span>
-                <div className="flex flex-col items-start gap-1 flex-1">
-                  <span className="text-xs text-gray-300">MAX</span>
+                <div className="w-2 h-0.5 bg-white/10 rounded-full" />
+                <div className="flex items-center gap-2 flex-1 h-11 bg-white/10 border border-white/10 rounded-full px-4 focus-within:ring-2 focus-within:ring-[#F3940B]/30 transition-all">
+                  <span className="text-[10px] font-black text-gray-400 uppercase">MAX</span>
                   <input
                     type="number"
                     min="0"
@@ -2335,7 +2458,7 @@ const Dashboard = () => {
                     disabled={fieldsDisabled}
                     onChange={(e) => setKwpMaxSearches(e.target.value)}
                     placeholder="e.g. 50000"
-                    className={`w-full px-3 py-2 text-black bg-[#FFFFFF] border border-gray-600 focus:outline-none focus:border-blue-500 ${fieldsDisabled ? 'opacity-50 cursor-not-allowed' : ''}`}
+                    className="w-full bg-transparent border-none outline-none text-white text-sm"
                   />
                 </div>
               </div>
@@ -2348,9 +2471,9 @@ const Dashboard = () => {
         </div>
 
         {/* Amazon Filters */}
-        <div className="mb-5 bg-[#243022] border border-white/10 rounded-xl overflow-hidden shadow-lg">
-          <div className="flex items-center gap-5 px-6 py-4 border-l-4 border-[#F3940B]">
-            <h3 className="text-[#F3940B] font-bold tracking-wider text-sm">AMAZON FILTERS</h3>
+        <div className="mb-6 bg-white/5 backdrop-blur-md border border-white/10 rounded-2xl overflow-hidden shadow-2xl transition-all relative z-[40]">
+          <div className="flex items-center gap-5 px-6 py-5 border-l-4 border-[#F3940B] bg-white/5">
+            <h3 className="text-[#F3940B] font-extrabold tracking-widest text-xs uppercase">AMAZON FILTERS</h3>
             {/* Toggle switch */}
             <button
               onClick={() => !fieldsDisabled && setAmazonFilters(!amazonFilters)}
@@ -2367,64 +2490,62 @@ const Dashboard = () => {
           </div>
 
           <div className={`px-6 pt-2 pb-5 flex flex-wrap items-center gap-6 lg:gap-10 ${!amazonFilters ? 'opacity-40 pointer-events-none' : ''}`}>
-            <div className="flex items-center gap-3">
-              <span className={`text-xs font-bold tracking-widest uppercase ${!amazonFilters ? 'text-gray-500' : 'text-gray-300'}`}>PRICE FILTER</span>
+            <div className="flex items-center gap-4">
+              <span className={`text-[10px] font-extrabold tracking-[0.15em] uppercase whitespace-nowrap ${!amazonFilters ? 'text-gray-500' : 'text-gray-400'}`}>PRICE</span>
               <div className="flex items-center gap-2">
-                <span className={`text-sm ${!amazonFilters ? 'text-gray-400' : ''}`}>MIN</span>
-                <input
-                  type="text"
-                  value={priceMin}
-                  onChange={(e) => setPriceMin(Number(e.target.value) || 0)}
-                  disabled={!amazonFilters || fieldsDisabled}
-                  className={`w-12 h-6 px-2 py-1 text-center rounded border text-xs ${(!amazonFilters || fieldsDisabled)
-                    ? 'bg-gray-300 text-gray-500 cursor-not-allowed'
-                    : 'bg-white text-black focus:outline-none focus:border-blue-500'
-                    }`}
-                />
-                <span className={`text-sm ${!amazonFilters ? 'text-gray-400' : ''}`}>MAX</span>
-                <input
-                  type="text"
-                  value={priceMax}
-                  onChange={(e) => setPriceMax(Number(e.target.value) || 0)}
-                  disabled={!amazonFilters || fieldsDisabled}
-                  className={`w-12 h-6 px-2 py-1 text-center rounded border text-xs ${(!amazonFilters || fieldsDisabled)
-                    ? 'bg-gray-300 text-gray-500 cursor-not-allowed'
-                    : 'bg-white text-black focus:outline-none focus:border-blue-500'
-                    }`}
-                />
+                <div className={`flex items-center gap-2 h-11 px-4 rounded-full border transition-all ${!amazonFilters ? 'bg-white/5 border-white/10' : 'bg-white/10 border-white/20'}`}>
+                  <span className="text-[10px] font-black text-gray-500">MIN</span>
+                  <input
+                    type="text"
+                    value={priceMin}
+                    onChange={(e) => setPriceMin(Number(e.target.value) || 0)}
+                    disabled={!amazonFilters || fieldsDisabled}
+                    className="w-10 bg-transparent border-none outline-none text-white text-xs font-bold text-center"
+                  />
+                </div>
+                <div className="w-2 h-0.5 bg-white/10 rounded-full" />
+                <div className={`flex items-center gap-2 h-11 px-4 rounded-full border transition-all ${!amazonFilters ? 'bg-white/5 border-white/10' : 'bg-white/10 border-white/20'}`}>
+                  <span className="text-[10px] font-black text-gray-500">MAX</span>
+                  <input
+                    type="text"
+                    value={priceMax}
+                    onChange={(e) => setPriceMax(Number(e.target.value) || 0)}
+                    disabled={!amazonFilters || fieldsDisabled}
+                    className="w-10 bg-transparent border-none outline-none text-white text-xs font-bold text-center"
+                  />
+                </div>
+              </div>
+            </div>
+
+            <div className="flex items-center gap-4">
+              <span className={`text-[10px] font-extrabold tracking-[0.15em] uppercase whitespace-nowrap ${!amazonFilters ? 'text-gray-500' : 'text-gray-400'}`}>REVIEWS</span>
+              <div className="flex items-center gap-2">
+                <div className={`flex items-center gap-2 h-11 px-4 rounded-full border transition-all ${!amazonFilters ? 'bg-white/5 border-white/10' : 'bg-white/10 border-white/20'}`}>
+                  <span className="text-[10px] font-black text-gray-500">MIN</span>
+                  <input
+                    type="text"
+                    value={reviewsMin}
+                    onChange={(e) => setReviewsMin(Number(e.target.value) || 0)}
+                    disabled={!amazonFilters || fieldsDisabled}
+                    className="w-12 bg-transparent border-none outline-none text-white text-xs font-bold text-center"
+                  />
+                </div>
+                <div className="w-2 h-0.5 bg-white/10 rounded-full" />
+                <div className={`flex items-center gap-2 h-11 px-4 rounded-full border transition-all ${!amazonFilters ? 'bg-white/5 border-white/10' : 'bg-white/10 border-white/20'}`}>
+                  <span className="text-[10px] font-black text-gray-500">MAX</span>
+                  <input
+                    type="text"
+                    value={reviewsMax}
+                    onChange={(e) => setReviewsMax(Number(e.target.value) || 0)}
+                    disabled={!amazonFilters || fieldsDisabled}
+                    className="w-12 bg-transparent border-none outline-none text-white text-xs font-bold text-center"
+                  />
+                </div>
               </div>
             </div>
 
             <div className="flex items-center gap-3">
-              <span className={`text-xs font-bold tracking-widest uppercase ${!amazonFilters ? 'text-gray-500' : 'text-gray-300'}`}>REVIEWS</span>
-              <div className="flex items-center gap-2">
-                <span className={`text-sm ${!amazonFilters ? 'text-gray-400' : ''}`}>MIN</span>
-                <input
-                  type="text"
-                  value={reviewsMin}
-                  onChange={(e) => setReviewsMin(Number(e.target.value) || 0)}
-                  disabled={!amazonFilters || fieldsDisabled}
-                  className={`w-12 h-6 px-2 py-1 text-center rounded border text-xs ${(!amazonFilters || fieldsDisabled)
-                    ? 'bg-gray-300 text-gray-500 cursor-not-allowed'
-                    : 'bg-white text-black focus:outline-none focus:border-blue-500'
-                    }`}
-                />
-                <span className={`text-sm ${!amazonFilters ? 'text-gray-400' : ''}`}>MAX</span>
-                <input
-                  type="text"
-                  value={reviewsMax}
-                  onChange={(e) => setReviewsMax(Number(e.target.value) || 0)}
-                  disabled={!amazonFilters || fieldsDisabled}
-                  className={`w-12 h-6 px-2 py-1 text-center rounded border text-xs ${(!amazonFilters || fieldsDisabled)
-                    ? 'bg-gray-300 text-gray-500 cursor-not-allowed'
-                    : 'bg-white text-black focus:outline-none focus:border-blue-500'
-                    }`}
-                />
-              </div>
-            </div>
-
-            <div className="flex items-center gap-3">
-              <span className={`text-xs font-bold tracking-widest uppercase ${!amazonFilters ? 'text-gray-500' : 'text-gray-300'}`}>RATING FILTER ▼</span>
+              <span className={`text-[10px] font-extrabold tracking-[0.15em] uppercase ${!amazonFilters ? 'text-gray-500' : 'text-gray-400'}`}>RATING</span>
               <div className="flex gap-1">
                 {[1, 2, 3, 4, 5].map((star) => (
                   <span
@@ -2453,7 +2574,7 @@ const Dashboard = () => {
 
             <div className="flex items-center gap-3">
               <span className={`text-xs font-bold tracking-widest uppercase ${!amazonFilters ? 'text-gray-500' : 'text-gray-300'}`}>FCL</span>
-              <div className={`px-3 py-1 flex items-center gap-2 ${!amazonFilters ? 'bg-gray-300' : 'bg-white'}`}>
+              <div className={`px-4 py-2 flex items-center gap-3 rounded-full border backdrop-blur-sm transition-all ${!amazonFilters ? 'bg-white/5 border-white/10' : 'bg-white/10 border-white/20'}`}>
                 <input
                   type="range"
                   min="0"
@@ -2462,15 +2583,15 @@ const Dashboard = () => {
                   value={fcl}
                   onChange={(e) => setFcl(Number(e.target.value))}
                   disabled={!amazonFilters || fieldsDisabled}
-                  className={`w-20 h-2 bg-gray-300 rounded-lg appearance-none ${(!amazonFilters || fieldsDisabled) ? 'cursor-not-allowed' : 'cursor-pointer'
+                  className={`w-24 h-1.5 bg-white/20 rounded-full appearance-none ${(!amazonFilters || fieldsDisabled) ? 'cursor-not-allowed' : 'cursor-pointer'
                     }`}
                   style={amazonFilters ? {
-                    background: `linear-gradient(to right, #1e40af 0%, #1e40af ${fcl * 100}%, #d1d5db ${fcl * 100}%, #d1d5db 100%)`,
+                    background: `linear-gradient(to right, #F3940B 0%, #F3940B ${fcl * 100}%, rgba(255,255,255,0.1) ${fcl * 100}%, rgba(255,255,255,0.1) 100%)`,
                     WebkitAppearance: 'none',
                     outline: 'none'
                   } : {}}
                 />
-                <span className={`text-xs font-medium min-w-[2.5rem] ${!amazonFilters ? 'text-gray-500' : 'text-gray-800'
+                <span className={`text-xs font-bold min-w-[2.5rem] ${!amazonFilters ? 'text-gray-500' : 'text-[#F3940B]'
                   }`}>{fcl.toFixed(2)}</span>
                 {amazonFilters && (
                   <style jsx>{`
@@ -2479,20 +2600,20 @@ const Dashboard = () => {
                       width: 12px;
                       height: 12px;
                       border-radius: 50%;
-                      background: #1e40af;
+                      background: #F3940B;
                       cursor: pointer;
-                      border: none;
-                      box-shadow: 0 2px 4px rgba(0,0,0,0.2);
+                      border: 2px solid white;
+                      box-shadow: 0 0 8px rgba(243, 148, 11, 0.4);
                     }
                     
                     input[type="range"]::-moz-range-thumb {
                       width: 12px;
                       height: 12px;
                       border-radius: 50%;
-                      background: #1e40af;
+                      background: #F3940B;
                       cursor: pointer;
-                      border: none;
-                      box-shadow: 0 2px 4px rgba(0,0,0,0.2);
+                      border: 2px solid white;
+                      box-shadow: 0 0 8px rgba(243, 148, 11, 0.4);
                     }
                   `}</style>
                 )}
@@ -2502,9 +2623,9 @@ const Dashboard = () => {
         </div>
 
         {/* Alibaba Filters */}
-        <div className="mb-8 bg-[#243022] border border-white/10 rounded-xl overflow-hidden shadow-lg">
-          <div className="flex items-center gap-5 px-6 py-4 border-l-4 border-blue-500">
-            <h3 className="text-blue-400 font-bold tracking-wider text-sm">ALIBABA SUPPLIER FILTERS</h3>
+        <div className="mb-8 bg-white/5 backdrop-blur-md border border-white/10 rounded-2xl overflow-hidden shadow-2xl transition-all relative z-[20]">
+          <div className="flex items-center gap-5 px-6 py-5 border-l-4 border-blue-500 bg-white/5">
+            <h3 className="text-blue-400 font-extrabold tracking-widest text-xs uppercase">ALIBABA SUPPLIER FILTERS</h3>
             {/* Toggle switch */}
             <button
               onClick={() => !fieldsDisabled && setAlibabaFilters(!alibabaFilters)}
@@ -2522,7 +2643,7 @@ const Dashboard = () => {
           <div className={`px-6 pt-2 pb-5 flex flex-wrap items-center gap-6 lg:gap-10 ${!alibabaFilters ? 'opacity-40 pointer-events-none' : ''}`}>
             <div className="flex items-center gap-3">
               <span className={`text-xs font-bold tracking-widest uppercase ${!alibabaFilters ? 'text-gray-500' : 'text-gray-300'}`}>COST BELOW %</span>
-              <div className={`px-3 py-1 flex items-center gap-2 ${!alibabaFilters ? 'bg-gray-300' : 'bg-white'}`}>
+              <div className={`px-4 py-2 flex items-center gap-3 rounded-full border backdrop-blur-sm transition-all ${!alibabaFilters ? 'bg-white/5 border-white/10' : 'bg-white/10 border-white/20'}`}>
                 <input
                   type="range"
                   min="0"
@@ -2531,15 +2652,15 @@ const Dashboard = () => {
                   value={costBelow}
                   onChange={(e) => setCostBelow(Number(e.target.value))}
                   disabled={!alibabaFilters || fieldsDisabled}
-                  className={`w-20 h-2 bg-gray-300 rounded-lg appearance-none ${(!alibabaFilters || fieldsDisabled) ? 'cursor-not-allowed' : 'cursor-pointer'
+                  className={`w-24 h-1.5 bg-white/20 rounded-full appearance-none ${(!alibabaFilters || fieldsDisabled) ? 'cursor-not-allowed' : 'cursor-pointer'
                     }`}
                   style={alibabaFilters ? {
-                    background: `linear-gradient(to right, #1e40af 0%, #1e40af ${costBelow * 100}%, #d1d5db ${costBelow * 100}%, #d1d5db 100%)`,
+                    background: `linear-gradient(to right, #3b82f6 0%, #3b82f6 ${costBelow * 100}%, rgba(255,255,255,0.1) ${costBelow * 100}%, rgba(255,255,255,0.1) 100%)`,
                     WebkitAppearance: 'none',
                     outline: 'none'
                   } : {}}
                 />
-                <span className={`text-xs font-medium min-w-[2.5rem] ${!alibabaFilters ? 'text-gray-500' : 'text-gray-800'
+                <span className={`text-xs font-bold min-w-[2.5rem] ${!alibabaFilters ? 'text-gray-500' : 'text-blue-400'
                   }`}>{costBelow.toFixed(2)}</span>
                 {alibabaFilters && (
                   <style jsx>{`
@@ -2548,38 +2669,38 @@ const Dashboard = () => {
                       width: 12px;
                       height: 12px;
                       border-radius: 50%;
-                      background: #1e40af;
+                      background: #3b82f6;
                       cursor: pointer;
-                      border: none;
-                      box-shadow: 0 2px 4px rgba(0,0,0,0.2);
+                      border: 2px solid white;
+                      box-shadow: 0 0 8px rgba(59, 130, 246, 0.4);
                     }
                     
                     input[type="range"]::-moz-range-thumb {
                       width: 12px;
                       height: 12px;
                       border-radius: 50%;
-                      background: #1e40af;
+                      background: #3b82f6;
                       cursor: pointer;
-                      border: none;
-                      box-shadow: 0 2px 4px rgba(0,0,0,0.2);
+                      border: 2px solid white;
+                      box-shadow: 0 0 8px rgba(59, 130, 246, 0.4);
                     }
                   `}</style>
                 )}
               </div>
             </div>
 
-            <div className="flex items-center gap-3">
-              <span className={`text-xs font-bold tracking-widest uppercase ${!alibabaFilters ? 'text-gray-500' : 'text-gray-300'}`}>MOQ</span>
-              <input
-                type="text"
-                value={moq}
-                onChange={(e) => setMoq(e.target.value)}
-                disabled={!alibabaFilters || fieldsDisabled}
-                className={`w-24 h-6 px-2 py-1 text-center border text-xs ${(!alibabaFilters || fieldsDisabled)
-                  ? 'text-gray-500 bg-gray-300 cursor-not-allowed'
-                  : 'text-black bg-white focus:outline-none focus:border-blue-500'
-                  }`}
-              />
+            <div className="flex items-center gap-4">
+              <span className={`text-[10px] font-extrabold tracking-[0.15em] uppercase ${!alibabaFilters ? 'text-gray-500' : 'text-gray-400'}`}>MOQ</span>
+              <div className={`flex items-center h-11 px-5 rounded-full border transition-all ${!alibabaFilters ? 'bg-white/5 border-white/10' : 'bg-white/10 border-white/20'}`}>
+                <input
+                  type="text"
+                  value={moq}
+                  onChange={(e) => setMoq(e.target.value)}
+                  disabled={!alibabaFilters || fieldsDisabled}
+                  className="w-20 bg-transparent border-none outline-none text-white text-sm font-bold text-center"
+                  placeholder="0"
+                />
+              </div>
             </div>
 
             <div className="flex items-center gap-3">
@@ -2610,27 +2731,21 @@ const Dashboard = () => {
               )}
             </div>
 
-            <div className={`flex items-center gap-3 px-3 py-1.5 rounded-lg ${!alibabaFilters ? 'bg-gray-700/30' : 'bg-white/10'}`}>
-              <span className={`text-xs font-bold tracking-widest uppercase ${!alibabaFilters ? 'text-gray-500' : 'text-gray-300'}`}>Verified Supplier:</span>
-              <div className="flex items-center gap-2">
+            <div className="flex items-center gap-4">
+              <span className={`text-[10px] font-extrabold tracking-[0.15em] uppercase ${!alibabaFilters ? 'text-gray-500' : 'text-gray-400'}`}>VERIFIED SUPPLIER</span>
+              <div className="flex items-center gap-3">
                 <button
                   onClick={() => !fieldsDisabled && setVerifiedSupplier(!verifiedSupplier)}
                   disabled={!alibabaFilters || fieldsDisabled}
-                  className={`relative inline-flex h-5 w-9 items-center rounded-full transition-colors focus:outline-none ${!alibabaFilters || fieldsDisabled
-                    ? 'bg-gray-400 cursor-not-allowed'
-                    : `${verifiedSupplier ? 'bg-green-500' : 'bg-gray-300'}`
-                    }`}
+                  className={`relative inline-flex h-6 w-11 items-center rounded-full transition-all duration-200 focus:outline-none shadow-inner ${verifiedSupplier ? 'bg-green-500' : 'bg-gray-600'
+                    } ${!alibabaFilters || fieldsDisabled ? 'opacity-50 cursor-not-allowed' : ''}`}
                 >
                   <span
-                    className={`inline-block h-3 w-3 transform rounded-full bg-white transition-transform ${!alibabaFilters || fieldsDisabled
-                      ? 'translate-x-1'
-                      : verifiedSupplier ? 'translate-x-5' : 'translate-x-1'
+                    className={`inline-block h-4 w-4 transform rounded-full bg-white transition-transform duration-200 ease-in-out shadow-sm ${verifiedSupplier ? 'translate-x-6' : 'translate-x-1'
                       }`}
                   />
                 </button>
-                <span className={`text-xs font-bold ${!alibabaFilters ? 'text-gray-500' : 'text-gray-800'}`}>
-                  {!alibabaFilters ? 'OFF' : (verifiedSupplier ? 'ON' : 'OFF')}
-                </span>
+                <span className="text-[10px] font-bold tracking-widest text-gray-500 uppercase">{verifiedSupplier ? 'ON' : 'OFF'}</span>
               </div>
             </div>
           </div>
@@ -2641,74 +2756,85 @@ const Dashboard = () => {
           return (
             <div className="flex flex-col sm:flex-row gap-3 justify-center items-center mt-4">
 
-              {/* Preset dropdown button */}
+              {/* Preset System */}
               <div className="relative" ref={dropdownRef}>
                 <button
-                  disabled={isActiveRun}
-                  onClick={() => setPresetDropdownOpen(o => !o)}
-                  className={`flex items-center gap-2 px-4 py-2.5 bg-[#243022] border border-white/20 text-white text-sm font-semibold rounded-lg transition-colors ${isActiveRun ? 'opacity-50 cursor-not-allowed' : 'hover:border-white/50'}`}
+                  onClick={() => setPresetDropdownOpen(!presetDropdownOpen)}
+                  className="flex items-center gap-3 px-6 h-11 bg-white/5 border border-white/20 rounded-full text-xs font-black tracking-widest text-gray-300 hover:bg-white/10 hover:border-white/40 transition-all shadow-lg backdrop-blur-md"
                 >
-                  {presetSaveFlash
-                    ? <span className="text-green-400">✓ SAVED</span>
-                    : selectedPresetId !== null && presets.find(p => p.id === selectedPresetId)
-                      ? presets.find(p => p.id === selectedPresetId)!.name
-                      : 'PRESETS'}
-                  <svg className={`w-3 h-3 transition-transform ${presetDropdownOpen ? 'rotate-180' : ''}`} fill="currentColor" viewBox="0 0 20 20">
-                    <path fillRule="evenodd" d="M5.293 7.293a1 1 0 011.414 0L10 10.586l3.293-3.293a1 1 0 111.414 1.414l-4 4a1 1 0 01-1.414 0l-4-4a1 1 0 010-1.414z" clipRule="evenodd" />
+                  <span className="truncate max-w-[120px]">
+                    {selectedPresetId ? presets.find(p => p.id === selectedPresetId)?.name : 'SELECT PRESET'}
+                  </span>
+                  <svg className={`w-3 h-3 transition-transform duration-200 ${presetDropdownOpen ? 'rotate-180' : ''}`} fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M19 9l-7 7-7-7" />
                   </svg>
                 </button>
 
-                {presetDropdownOpen && !isActiveRun && (
-                  <div className="absolute bottom-full mb-2 left-0 z-50 bg-[#1a2318] border border-white/20 rounded-xl shadow-2xl min-w-[260px] overflow-hidden">
-                    {/* Preset list */}
-                    {presets.length === 0 ? (
-                      <div className="px-4 py-3 text-sm text-gray-400 text-center">No presets saved yet.</div>
-                    ) : (
-                      <div className="flex flex-col">
-                        {presets.map((p) => (
-                          <div key={p.id} className={`flex items-center gap-1 px-3 py-2 border-b border-white/5 hover:bg-white/5 ${selectedPresetId === p.id ? 'bg-white/10' : ''}`}>
-                            {/* Name / rename input */}
-                            {editingPresetId === p.id ? (
-                              <input
-                                autoFocus
-                                type="text"
-                                value={presetNameInput}
-                                onChange={(e) => setPresetNameInput(e.target.value)}
-                                onBlur={() => handleRenamePreset(p.id, presetNameInput)}
-                                onKeyDown={(e) => {
-                                  if (e.key === 'Enter') handleRenamePreset(p.id, presetNameInput);
-                                  if (e.key === 'Escape') setEditingPresetId(null);
-                                }}
-                                className="flex-1 px-2 py-0.5 text-black bg-white text-sm rounded focus:outline-none"
-                              />
-                            ) : (
-                              <button
-                                onClick={() => setSelectedPresetId(p.id)}
-                                className="flex-1 text-left text-sm text-white truncate"
-                              >
-                                {p.name}
-                              </button>
-                            )}
-                            {/* Icon buttons */}
-                            <button
-                              title="Load"
-                              onClick={() => { setSelectedPresetId(p.id); handleLoadPreset(p.id); setPresetDropdownOpen(false); }}
-                              className="shrink-0 px-2 py-0.5 text-xs text-[#C0FE72] border border-[#C0FE72]/40 rounded hover:bg-[#C0FE72]/10 transition-colors"
-                            >⬆ LOAD</button>
-                            <button
-                              title="Rename"
-                              onClick={() => { setPresetNameInput(p.name); setEditingPresetId(p.id); }}
-                              className="shrink-0 px-2 py-0.5 text-xs text-gray-300 border border-white/20 rounded hover:bg-white/10 transition-colors"
-                            >✎</button>
-                            <button
-                              title="Delete"
-                              onClick={() => handleDeletePreset(p.id)}
-                              className="shrink-0 px-2 py-0.5 text-xs text-red-400 border border-red-500/30 rounded hover:bg-red-500/10 transition-colors"
-                            >🗑</button>
+                {presetDropdownOpen && (
+                  <div className="absolute bottom-full left-0 mb-3 w-[280px] bg-[#1a2318] border border-white/10 rounded-2xl shadow-2xl z-[120] overflow-hidden backdrop-blur-xl animate-in fade-in slide-in-from-bottom-2 duration-200">
+                    <div className="px-4 py-3 border-b border-white/5 bg-white/5">
+                      <span className="text-[10px] font-black tracking-[0.2em] text-[#F3940B] uppercase">Saved Presets</span>
+                    </div>
+
+                    <div className="max-h-[300px] overflow-y-auto py-2 custom-scrollbar">
+                      {presets.length === 0 ? (
+                        <div className="px-5 py-6 text-center text-gray-500 text-xs italic">
+                          No presets saved yet
+                        </div>
+                      ) : (
+                        presets.map((p) => (
+                          <div key={p.id} className="group px-3 py-1">
+                            <div className={`flex items-center gap-2 p-2 rounded-xl transition-all ${selectedPresetId === p.id ? 'bg-[#F3940B]/10 border border-[#F3940B]/20' : 'hover:bg-white/5 border border-transparent'}`}>
+                              {editingPresetId === p.id ? (
+                                <input
+                                  autoFocus
+                                  className="flex-1 bg-white/10 text-white px-2 py-1 rounded text-xs outline-none ring-1 ring-[#F3940B]/50"
+                                  value={presetNameInput}
+                                  onChange={(e) => setPresetNameInput(e.target.value)}
+                                  onBlur={() => handleRenamePreset(p.id, presetNameInput)}
+                                  onKeyDown={(e) => {
+                                    if (e.key === 'Enter') handleRenamePreset(p.id, presetNameInput);
+                                    if (e.key === 'Escape') setEditingPresetId(null);
+                                  }}
+                                />
+                              ) : (
+                                <button
+                                  onClick={() => {
+                                    setSelectedPresetId(p.id);
+                                    handleLoadPreset(p.id);
+                                    setPresetDropdownOpen(false);
+                                  }}
+                                  className={`flex-1 text-left text-xs font-bold truncate ${selectedPresetId === p.id ? 'text-[#F3940B]' : 'text-gray-300 group-hover:text-white'}`}
+                                >
+                                  {p.name}
+                                </button>
+                              )}
+
+                              <div className="flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
+                                <button
+                                  onClick={() => { setPresetNameInput(p.name); setEditingPresetId(p.id); }}
+                                  className="p-1.5 text-gray-400 hover:text-white hover:bg-white/10 rounded-lg transition-all"
+                                  title="Rename"
+                                >
+                                  <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M15.232 5.232l3.536 3.536m-2.036-5.036a2.5 2.5 0 113.536 3.536L6.5 21.036H3v-3.572L16.732 3.732z" />
+                                  </svg>
+                                </button>
+                                <button
+                                  onClick={() => handleDeletePreset(p.id)}
+                                  className="p-1.5 text-gray-500 hover:text-red-400 hover:bg-red-400/10 rounded-lg transition-all"
+                                  title="Delete"
+                                >
+                                  <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-4v6m4-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
+                                  </svg>
+                                </button>
+                              </div>
+                            </div>
                           </div>
-                        ))}
-                      </div>
-                    )}
+                        ))
+                      )}
+                    </div>
                     {/* Save new preset */}
                     <div className="px-3 py-2 border-t border-white/10 mt-1 pt-3">
                       {isCreatingNewPreset ? (
@@ -2770,7 +2896,7 @@ const Dashboard = () => {
               <button
                 onClick={handleReset}
                 disabled={isActiveRun}
-                className={`px-6 py-2.5 bg-transparent font-semibold tracking-wider border border-white/50 rounded-lg transition-colors text-sm ${isActiveRun ? 'opacity-50 cursor-not-allowed text-gray-400' : 'text-white hover:bg-white/10'}`}
+                className={`px-8 py-3 bg-transparent font-bold tracking-widest border border-white/30 rounded-full transition-all text-xs uppercase ${isActiveRun ? 'opacity-50 cursor-not-allowed text-gray-400' : 'text-white hover:bg-white/10 hover:border-white/60 shadow-lg shadow-black/20'}`}
               >
                 ↺ RESET
               </button>
@@ -2778,9 +2904,9 @@ const Dashboard = () => {
               <button
                 onClick={handleExportCsv}
                 disabled={isActiveRun || pipelineStatus !== 'COMPLETED'}
-                className={`px-7 py-2.5 rounded-lg font-bold tracking-wide transition-all text-sm ${!isActiveRun && pipelineStatus === 'COMPLETED'
-                  ? 'bg-blue-600 text-white hover:bg-blue-500 shadow-lg shadow-blue-900/40'
-                  : 'bg-gray-700/60 text-gray-400 cursor-not-allowed border border-white/10'
+                className={`px-8 py-3 rounded-full font-bold tracking-widest transition-all text-xs uppercase ${!isActiveRun && pipelineStatus === 'COMPLETED'
+                  ? 'bg-blue-600 text-white hover:bg-blue-500 shadow-xl shadow-blue-900/40 hover:scale-105 active:scale-95'
+                  : 'bg-white/5 text-gray-500 cursor-not-allowed border border-white/10'
                   }`}
               >
                 ⬇ EXPORT CSV
@@ -2789,20 +2915,20 @@ const Dashboard = () => {
               <button
                 onClick={handleSearch}
                 disabled={isActiveRun || !!variantLimitMaxError}
-                className={`px-10 py-2.5 font-bold tracking-wider rounded-lg transition-all text-sm ${isActiveRun || variantLimitMaxError
-                  ? 'bg-gray-700/60 text-gray-400 cursor-not-allowed border border-white/10'
-                  : 'bg-[#F3940B] text-black hover:bg-[#e8860a] shadow-lg shadow-orange-900/40'
+                className={`px-12 py-3 font-extrabold tracking-widest rounded-full transition-all text-xs uppercase ${isActiveRun || variantLimitMaxError
+                  ? 'bg-white/5 text-gray-500 cursor-not-allowed border border-white/10'
+                  : 'bg-[#F3940B] text-black hover:bg-[#e8860a] shadow-xl shadow-orange-900/40 hover:scale-105 active:scale-95'
                   }`}
               >
-                {isActiveRun ? '⟳ SEARCHING...' : '⬛ SEARCH'}
+                {isActiveRun ? 'SEARCHING...' : '⬛ SEARCH'}
               </button>
 
               <button
                 onClick={handleStopSearch}
                 disabled={!isActiveRun}
-                className={`px-7 py-2.5 font-bold tracking-wide rounded-lg transition-all text-sm ${isActiveRun
-                  ? 'bg-red-700 text-white hover:bg-red-600 shadow-lg shadow-red-900/40'
-                  : 'bg-gray-700/60 text-gray-400 opacity-50 cursor-not-allowed border border-white/10'
+                className={`px-8 py-3 font-bold tracking-widest rounded-full transition-all text-xs uppercase ${isActiveRun
+                  ? 'bg-red-600 text-white hover:bg-red-500 shadow-xl shadow-red-900/40 hover:scale-105 active:scale-95'
+                  : 'bg-white/5 text-gray-500 opacity-50 cursor-not-allowed border border-white/10'
                   }`}
               >
                 ✕ STOP CURRENT SEARCH
@@ -2816,10 +2942,10 @@ const Dashboard = () => {
           <div className="mt-8">
             {/* Preliminary results banner - shown while pipeline is still running and we have partial data */}
             {isPreliminary && pipelineStatus === 'POLLING' && products.length > 0 && (
-              <div className="mb-4 px-4 py-3 bg-yellow-500/20 border border-yellow-400/50 rounded flex items-center gap-3">
-                <span className="w-2.5 h-2.5 rounded-full bg-yellow-400 flex-shrink-0 animate-pulse" />
-                <p className="text-yellow-300 text-sm font-semibold tracking-wide">
-                  PRELIMINARY / PROCESSING — Pipeline still running. These are partial results from the previous consolidated dataset and will update automatically once the pipeline completes.
+              <div className="mb-6 px-6 py-4 bg-orange-500/10 border border-orange-500/30 rounded-2xl flex items-center gap-4 backdrop-blur-md shadow-lg">
+                <span className="w-3 h-3 rounded-full bg-orange-500 animate-ping flex-shrink-0" />
+                <p className="text-orange-200 text-xs font-bold tracking-widest uppercase">
+                  PRELIMINARY RESULTS — Pipeline processing... Data will refresh automatically.
                 </p>
               </div>
             )}
@@ -2828,36 +2954,42 @@ const Dashboard = () => {
             {(pipelineStatus === 'COMPLETED' || pipelineStatus === 'POLLING') && consolidatedResults.length > 0 && (
               <div className="mt-6 mb-10">
                 {/* Header */}
-                <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 mb-5 border-b border-[#C0FE72]/30 pb-4">
+                <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-5 mb-6 border-b border-white/10 pb-5">
                   <div>
-                    <h2 className="text-2xl font-bold text-[#C0FE72] tracking-wider">CONSOLIDATED RESULTS</h2>
-                    <p className="text-xs text-gray-400 mt-1">Merged from all pipeline stages · Scored &amp; ranked in-browser</p>
+                    <h2 className="text-3xl font-extrabold text-[#C0FE72] tracking-[0.2em] uppercase">CONSOLIDATED RESULTS</h2>
+                    <p className="text-[10px] text-gray-500 font-bold tracking-widest uppercase mt-2">Ranked by ATAI Proprietary Scoring Engine</p>
                   </div>
-                  <div className="flex items-center gap-3">
-                    <span className="inline-flex items-center gap-2 px-3 py-1 bg-green-500/20 border border-green-400/40 rounded text-green-300 text-xs font-bold">
+                  <div className="flex items-center gap-4">
+                    <span className="inline-flex items-center gap-2 px-4 py-1.5 bg-green-500/10 border border-green-500/30 rounded-full text-green-400 text-[10px] font-extrabold tracking-widest uppercase">
                       <span className="w-2 h-2 rounded-full bg-green-400" />
                       SUCCEEDED
                     </span>
-                    <span className="text-sm text-gray-300">
-                      {consolidatedResults.length} rows
+                    <span className="text-xs font-bold text-gray-400 tracking-widest uppercase bg-white/5 px-3 py-1.5 rounded-full border border-white/10">
+                      {consolidatedResults.length} ROWS
                     </span>
                   </div>
                 </div>
 
                 {/* Score legend */}
-                <div className="flex flex-wrap gap-4 mb-4 text-xs text-gray-400">
-                  <span><strong className="text-[#C0FE72]">Demand</strong> 35% · Avg monthly searches (KWP)</span>
-                  <span><strong className="text-[#C0FE72]">Trend</strong> 30% · Google Trends peak interest</span>
-                  <span><strong className="text-[#C0FE72]">Competition</strong> 15% · Inverse of Amazon review count</span>
-                  <span><strong className="text-[#C0FE72]">Supplier</strong> 10% · Alibaba rating + low MOQ</span>
-                  <span><strong className="text-[#C0FE72]">Price</strong> 10% · Amazon price relative to others</span>
+                <div className="flex flex-wrap gap-3 mb-6">
+                  {[
+                    { label: 'Demand', weight: '35%', color: '#C0FE72' },
+                    { label: 'Trend', weight: '30%', color: '#C0FE72' },
+                    { label: 'Competition', weight: '15%', color: '#C0FE72' },
+                    { label: 'Supplier', weight: '10%', color: '#C0FE72' },
+                    { label: 'Price', weight: '10%', color: '#C0FE72' }
+                  ].map((item) => (
+                    <span key={item.label} className="text-[10px] font-bold tracking-widest text-gray-400 uppercase bg-white/5 border border-white/10 px-3 py-1 rounded-full backdrop-blur-sm">
+                      <span style={{ color: item.color }}>{item.label}</span> {item.weight}
+                    </span>
+                  ))}
                 </div>
 
 
 
                 {/* Scrollable container referencing the mainTableScrollRef */}
                 <div
-                  className="overflow-x-auto overflow-y-auto max-h-[80vh] border border-white/20 rounded custom-scrollbar relative"
+                  className="overflow-x-auto overflow-y-auto max-h-[80vh] border border-white/10 rounded-2xl custom-scrollbar relative shadow-2xl"
                   ref={mainTableScrollRef}
                   onScroll={handleMainTableScroll}
                 >
@@ -3023,75 +3155,116 @@ const Dashboard = () => {
               <div className="mb-10">
                 {/* Category: keywords from Google Trends - show first */}
                 {searchingMode === 'CATEGORY BASED' && categoryKeywordsPreview !== null && categoryKeywordsPreview.length > 0 && (
-                  <div className="mb-8 p-6 bg-[#2a3627] rounded shadow-xl border border-[#C0FE72]/30">
-                    <h3 className="text-2xl font-bold text-[#C0FE72] tracking-wider mb-2">KEYWORDS FROM GOOGLE TRENDS</h3>
-                    <p className="text-sm text-gray-400 mb-4">Keywords generated for this category; one Step Function execution runs per keyword.</p>
-                    <div className="flex flex-wrap gap-2">
+                  <div className="mb-8 p-8 bg-white/5 backdrop-blur-md rounded-2xl shadow-2xl border border-white/10 relative overflow-hidden group">
+                    <div className="absolute top-0 left-0 w-1 h-full bg-[#C0FE72]/50 group-hover:bg-[#C0FE72] transition-all" />
+                    <h3 className="text-2xl font-extrabold text-[#C0FE72] tracking-[0.2em] mb-1 uppercase">KEYWORDS FROM KEYWORD PLANNER</h3>
+                    <p className="text-[10px] text-gray-500 font-bold tracking-widest uppercase mb-6">Generated variants that trigger separate parallel pipelines</p>
+                    <div className="flex flex-wrap gap-3">
                       {categoryKeywordsPreview.map((kw, idx) => (
                         <span
                           key={idx}
-                          className="px-3 py-1.5 bg-[#32402F] text-gray-100 rounded border border-white/20 text-sm"
+                          className="px-5 py-2 bg-[#C0FE72]/5 text-[#C0FE72] font-black rounded-full border border-[#C0FE72]/20 text-[10px] tracking-widest shadow-sm transition-all hover:bg-[#C0FE72]/10 hover:border-[#C0FE72]/40"
                         >
                           {kw}
                         </span>
                       ))}
                     </div>
-                    <p className="text-xs text-gray-500 mt-4">Total: {categoryKeywordsPreview.length} keyword(s)</p>
+                    <div className="mt-6 flex items-center gap-2">
+                      <span className="text-[9px] text-gray-600 font-black tracking-[0.2em] uppercase">Total Variants:</span>
+                      <span className="text-[10px] text-[#C0FE72] font-black">{categoryKeywordsPreview.length}</span>
+                    </div>
                   </div>
                 )}
 
                 {/* Category Pipeline Tracker - show second (above stage results) */}
                 {searchingMode === 'CATEGORY BASED' && categoryExecutions.length > 0 && (
-                  <div className="mb-8 p-6 bg-[#2a3627] rounded shadow-xl border border-white/10">
-                    <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-4 mb-4">
+                  <div className="mb-8 p-8 bg-white/5 backdrop-blur-md rounded-2xl shadow-2xl border border-white/10 relative group">
+                    <div className="absolute top-0 left-0 w-1 h-full bg-blue-500/50 group-hover:bg-blue-500 transition-all" />
+                    <div className="flex flex-col lg:flex-row lg:items-center lg:justify-between gap-6 mb-10">
                       <div>
-                        <h3 className="text-2xl font-bold text-[#C0FE72] tracking-wider">CATEGORY PIPELINE TRACKER</h3>
-                        <div className="text-xs text-gray-400">Each variant keyword runs its own pipeline.</div>
+                        <h3 className="text-2xl font-extrabold text-[#C0FE72] tracking-[0.2em] uppercase">CATEGORY PIPELINE TRACKER</h3>
+                        <div className="text-[10px] text-gray-500 font-bold tracking-widest uppercase mt-1">Monitoring individual variant execution status</div>
                       </div>
-                      <div className="flex flex-col md:flex-row md:items-center gap-2">
-                        <span className="text-xs font-semibold text-gray-200 uppercase tracking-wide">Variant View</span>
-                        <select
-                          value={selectedCategoryVariant}
-                          onChange={(e) => handleCategoryVariantChange(e.target.value)}
-                          className="px-3 py-1 text-xs bg-[#32402F] text-white border border-white/40 rounded focus:outline-none focus:border-[#C0FE72]"
-                        >
-                          <option value="ALL">Select a variant</option>
-                          {categoryExecutions.map((exec) => (
-                            <option key={exec.keyword} value={exec.keyword}>
-                              {exec.keyword}
-                            </option>
-                          ))}
-                        </select>
+                      <div className="flex flex-col sm:flex-row sm:items-center gap-4">
+                        <span className="text-[10px] font-black text-gray-500 uppercase tracking-[0.2em] whitespace-nowrap">SWITCH VARIANT VIEW</span>
+                        <div className="relative min-w-[240px]" ref={variantDropdownRef}>
+                          <button
+                            onClick={() => setShowVariantDropdown(!showVariantDropdown)}
+                            className="w-full px-5 h-11 bg-white/5 border border-white/10 rounded-full text-xs font-bold text-white flex items-center justify-between hover:bg-white/10 hover:border-white/30 transition-all backdrop-blur-sm"
+                          >
+                            <span className="truncate">{selectedCategoryVariant === 'ALL' ? 'Select a variant...' : selectedCategoryVariant}</span>
+                            <svg className={`w-4 h-4 text-gray-500 transition-transform duration-200 ${showVariantDropdown ? 'rotate-180' : ''}`} fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M19 9l-7 7-7-7" />
+                            </svg>
+                          </button>
+
+                          {showVariantDropdown && (
+                            <div className="absolute top-full left-0 mt-2 w-full bg-[#1a2318] border border-white/10 rounded-2xl shadow-2xl z-[120] overflow-hidden backdrop-blur-xl animate-in fade-in slide-in-from-top-2 duration-200">
+                              <div className="p-2 border-b border-white/5">
+                                <input
+                                  type="text"
+                                  value={variantSearch}
+                                  onChange={(e) => setVariantSearch(e.target.value)}
+                                  placeholder="Search variant..."
+                                  className="w-full bg-white/5 border border-white/10 rounded-full px-4 py-1.5 text-xs text-white focus:outline-none focus:ring-1 focus:ring-[#C0FE72]/30"
+                                />
+                              </div>
+                              <div className="max-h-60 overflow-y-auto py-1 custom-scrollbar">
+                                <button
+                                  onClick={() => { handleCategoryVariantChange('ALL'); setShowVariantDropdown(false); setVariantSearch(''); }}
+                                  className={`w-full px-5 py-2.5 text-left text-sm transition-colors hover:bg-[#C0FE72]/10 ${selectedCategoryVariant === 'ALL' ? 'text-[#C0FE72] bg-[#C0FE72]/5' : 'text-gray-300'}`}
+                                >
+                                  Select a variant...
+                                </button>
+                                {categoryExecutions.filter(exec => exec.keyword.toLowerCase().includes(variantSearch.toLowerCase())).map((exec) => (
+                                  <button
+                                    key={exec.keyword}
+                                    onClick={() => {
+                                      handleCategoryVariantChange(exec.keyword);
+                                      setShowVariantDropdown(false);
+                                      setVariantSearch('');
+                                    }}
+                                    className={`w-full px-5 py-2.5 text-left text-sm transition-colors hover:bg-[#C0FE72]/10 ${selectedCategoryVariant === exec.keyword ? 'text-[#C0FE72] bg-[#C0FE72]/5' : 'text-gray-300'}`}
+                                  >
+                                    {exec.keyword}
+                                  </button>
+                                ))}
+                              </div>
+                            </div>
+                          )}
+                        </div>
                       </div>
                     </div>
-                    <div className="overflow-x-auto">
+                    <div className="overflow-x-auto rounded-xl border border-white/10 bg-black/20">
                       <table className="w-full text-sm text-left border-collapse">
                         <thead>
-                          <tr className="border-b border-white/30 text-gray-300">
-                            <th className="pb-3 pr-4 font-semibold uppercase tracking-wider">Target Keyword</th>
-                            <th className="pb-3 px-4 font-semibold uppercase tracking-wider">Execution Status</th>
-                            <th className="pb-3 pl-4 font-semibold uppercase tracking-wider">Run ID / ARN</th>
+                          <tr className="bg-white/5 text-gray-400 border-b border-white/10">
+                            <th className="py-5 px-6 font-black uppercase tracking-[0.2em] text-[10px]">Target Keyword</th>
+                            <th className="py-5 px-6 font-black uppercase tracking-[0.2em] text-[10px]">Execution Status</th>
+                            <th className="py-5 px-6 font-black uppercase tracking-[0.2em] text-[10px]">Run ID / ARN</th>
                           </tr>
                         </thead>
                         <tbody>
                           {categoryExecutions.map((exec, idx) => (
-                            <tr key={idx} className="border-b border-white/10 hover:bg-white/5 transition-colors">
-                              <td className="py-4 pr-4 font-medium text-white">{exec.keyword}</td>
-                              <td className="py-4 px-4">
-                                <span className={`inline-flex items-center px-3 py-1 rounded-full text-xs font-bold tracking-tight shadow-sm ${exec.status === 'SUCCEEDED' ? 'bg-green-500/20 text-green-400 border border-green-500/30' :
-                                  exec.status === 'FAILED' ? 'bg-red-500/20 text-red-400 border border-red-500/30' :
-                                    exec.status === 'RUNNING' ? 'bg-blue-500/20 text-blue-400 border border-blue-500/30 animate-pulse' :
-                                      'bg-gray-500/20 text-gray-400 border border-gray-500/30'
+                            <tr key={idx} className="border-b border-white/5 hover:bg-white/5 transition-colors">
+                              <td className="py-5 px-6 font-extrabold text-white text-xs tracking-wide">{exec.keyword}</td>
+                              <td className="py-5 px-6">
+                                <span className={`inline-flex items-center px-4 py-1.5 rounded-full text-[10px] font-black tracking-widest uppercase shadow-lg ${exec.status === 'SUCCEEDED' ? 'bg-green-500/10 text-green-400 border border-green-500/20' :
+                                  exec.status === 'FAILED' ? 'bg-red-500/10 text-red-400 border border-red-500/20' :
+                                    exec.status === 'ABORTED' ? 'bg-orange-500/10 text-orange-400 border border-orange-500/30' :
+                                      exec.status === 'RUNNING' ? 'bg-blue-500/10 text-blue-400 border border-blue-500/20 animate-pulse' :
+                                        'bg-gray-500/10 text-gray-500 border border-white/10'
                                   }`}>
-                                  <span className={`w-2 h-2 rounded-full mr-2 ${exec.status === 'SUCCEEDED' ? 'bg-green-400' :
-                                    exec.status === 'FAILED' ? 'bg-red-400' :
-                                      exec.status === 'RUNNING' ? 'bg-blue-400' :
-                                        'bg-gray-400'
+                                  <span className={`w-2 h-2 rounded-full mr-2.5 ${exec.status === 'SUCCEEDED' ? 'bg-green-400 shadow-[0_0_8px_rgba(74,222,128,0.5)]' :
+                                    exec.status === 'FAILED' ? 'bg-red-400 shadow-[0_0_8px_rgba(248,113,113,0.5)]' :
+                                      exec.status === 'ABORTED' ? 'bg-orange-400 shadow-[0_0_8px_rgba(251,146,60,0.5)]' :
+                                        exec.status === 'RUNNING' ? 'bg-blue-400 shadow-[0_0_8px_rgba(96,165,250,0.5)]' :
+                                          'bg-gray-500'
                                     }`}></span>
                                   {exec.status || 'INITIALIZING'}
                                 </span>
                               </td>
-                              <td className="py-4 pl-4 font-mono text-[10px] text-gray-500 break-all max-w-xs">{exec.run_id || exec.execution_arn}</td>
+                              <td className="py-5 px-6 font-mono text-[10px] text-gray-600 break-all max-w-xs selections:bg-white/10">{exec.run_id || exec.execution_arn}</td>
                             </tr>
                           ))}
                         </tbody>
@@ -3113,18 +3286,19 @@ const Dashboard = () => {
                 {searchingMode === 'CATEGORY BASED' &&
                   categoryExecutions.length > 0 &&
                   selectedCategoryVariant !== 'ALL' &&
-                  pipelineStatus === 'COMPLETED' &&
+                  (pipelineStatus === 'COMPLETED' || pipelineStatus === 'FAILED') &&
                   hasLoadedKeywordPlanner &&
                   hasLoadedTrends &&
                   !keywordPlannerResults?.length &&
                   !trendsResults?.length && (
-                    <div className="mb-6 p-4 bg-[#2a3627] rounded border border-red-400/40 text-center">
-                      <p className="text-sm text-gray-100 font-semibold">
-                        All candidate variants for this keyword were removed by the pipeline filters, so no stage files were written.
+                    <div className="mb-6 p-6 bg-[#2a3627] rounded-2xl border border-red-400/20 text-center shadow-xl backdrop-blur-md">
+                      <div className="text-3xl mb-3">⚠️</div>
+                      <p className="text-sm text-gray-100 font-bold uppercase tracking-widest">
+                        {statusMessage === 'ABORTED' ? 'Pipeline was manually stopped' : 'No surviving stage data found'}
                       </p>
-                      <p className="mt-2 text-xs text-gray-400">
-                        Try relaxing your filters (search volume, Google Trends score, marketplace filters) or choose another variant from the{' '}
-                        <strong className="text-[#C0FE72]">Variant View</strong> dropdown above.
+                      <p className="mt-2 text-xs text-gray-400 max-w-md mx-auto leading-relaxed">
+                        The pipeline for <strong className="text-[#C0FE72]">{selectedCategoryVariant}</strong> {statusMessage === 'ABORTED' ? 'was terminated before it could finish.' : 'produced no results that passed your current filters.'}
+                        Try relaxing your settings or choose another variant from the dropdown.
                       </p>
                     </div>
                   )}
@@ -3149,19 +3323,27 @@ const Dashboard = () => {
                   const displayRows = filterStageRowsByVariant(keywordPlannerResults, ['root_keyword', 'sub_keyword', 'keyword'], 'root_keyword');
                   if (!displayRows || displayRows.length === 0) return null;
                   return (
-                    <div className="mb-8 p-6 bg-[#2a3627] rounded shadow-xl border border-white/10">
-                      <div className="flex justify-between items-center mb-4">
-                        <h3 className="text-2xl font-bold text-[#C0FE72] tracking-wider">KEYWORD PLANNER STAGE</h3>
-                        <div className="text-sm text-gray-300">
-                          {keywordPlannerMeta?.message || 'Keyword Planner Parquet created'} · Rows: {keywordPlannerMeta?.rows ?? displayRows.length}
+                    <div className="mb-8 p-8 bg-white/5 backdrop-blur-md rounded-2xl shadow-2xl border border-white/10 relative overflow-hidden group">
+                      <div className="absolute top-0 left-0 w-1 h-full bg-[#C0FE72]/50 group-hover:bg-[#C0FE72] transition-all" />
+                      <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-5 mb-8">
+                        <div>
+                          <h3 className="text-2xl font-extrabold text-[#C0FE72] tracking-[0.2em] uppercase">KEYWORD PLANNER STAGE</h3>
+                          <div className="text-[10px] text-gray-500 font-bold tracking-widest uppercase mt-1">
+                            {keywordPlannerMeta?.message || 'Raw Keyword Planner Data'}
+                          </div>
+                        </div>
+                        <div className="flex items-center gap-3">
+                          <span className="px-4 py-1.5 bg-[#C0FE72]/10 border border-[#C0FE72]/20 rounded-full text-[#C0FE72] text-[10px] font-black tracking-widest uppercase">
+                            {keywordPlannerMeta?.rows ?? displayRows.length} ROWS
+                          </span>
                         </div>
                       </div>
-                      <div className="overflow-x-auto">
-                        <table className="w-full text-sm text-left border-collapse">
-                          <thead>
-                            <tr className="border-b border-white/30 text-gray-300">
+                      <div className="overflow-x-auto rounded-xl border border-white/10 bg-black/20 custom-scrollbar max-h-[500px]">
+                        <table className="min-w-full text-sm text-left border-separate border-spacing-0">
+                          <thead className="sticky top-0 z-10 bg-[#1a2318]">
+                            <tr className="text-gray-400 border-b border-white/10">
                               {Object.keys(displayRows[0]).map((col) => (
-                                <th key={col} className="pb-3 pr-4 font-semibold uppercase tracking-wider whitespace-nowrap">
+                                <th key={col} className="py-5 px-6 font-black uppercase tracking-[0.2em] text-[10px] border-b border-white/10">
                                   {col.replace(/_/g, ' ')}
                                 </th>
                               ))}
@@ -3169,9 +3351,9 @@ const Dashboard = () => {
                           </thead>
                           <tbody>
                             {displayRows.map((row, idx) => (
-                              <tr key={idx} className="border-b border-white/10 hover:bg-white/5 transition-colors">
+                              <tr key={idx} className="border-b border-white/5 hover:bg-white/5 transition-colors">
                                 {Object.keys(displayRows[0]).map((col) => (
-                                  <td key={col} className="py-2 pr-4 text-gray-100 whitespace-nowrap">
+                                  <td key={col} className="py-4 px-6 text-gray-100 whitespace-nowrap border-b border-white/5 font-medium tracking-wide">
                                     {(row as any)[col] !== undefined && (row as any)[col] !== null
                                       ? String((row as any)[col])
                                       : '-'}
@@ -3199,19 +3381,27 @@ const Dashboard = () => {
                   const displayRows = filterStageRowsByVariant(trendsResults, ['keyword'], 'keyword');
                   if (!displayRows || displayRows.length === 0) return null;
                   return (
-                    <div className="mb-8 p-6 bg-[#2a3627] rounded shadow-xl border border-white/10">
-                      <div className="flex justify-between items-center mb-4">
-                        <h3 className="text-2xl font-bold text-[#C0FE72] tracking-wider">GOOGLE TRENDS STAGE</h3>
-                        <div className="text-sm text-gray-300">
-                          {trendsMeta?.message || 'Google Trends Parquet created successfully'} · Rows: {trendsMeta?.rows ?? displayRows.length}
+                    <div className="mb-8 p-8 bg-white/5 backdrop-blur-md rounded-2xl shadow-2xl border border-white/10 relative overflow-hidden group">
+                      <div className="absolute top-0 left-0 w-1 h-full bg-[#F3940B]/50 group-hover:bg-[#F3940B] transition-all" />
+                      <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-5 mb-8">
+                        <div>
+                          <h3 className="text-2xl font-extrabold text-[#F3940B] tracking-[0.2em] uppercase">GOOGLE TRENDS STAGE</h3>
+                          <div className="text-[10px] text-gray-500 font-bold tracking-widest uppercase mt-1">
+                            {trendsMeta?.message || 'Processed Interest Over Time Data'}
+                          </div>
+                        </div>
+                        <div className="flex items-center gap-3">
+                          <span className="px-4 py-1.5 bg-[#F3940B]/10 border border-[#F3940B]/20 rounded-full text-[#F3940B] text-[10px] font-black tracking-widest uppercase">
+                            {trendsMeta?.rows ?? displayRows.length} ROWS
+                          </span>
                         </div>
                       </div>
-                      <div className="overflow-x-auto">
-                        <table className="w-full text-sm text-left border-collapse">
-                          <thead>
-                            <tr className="border-b border-white/30 text-gray-300">
+                      <div className="overflow-x-auto rounded-xl border border-white/10 bg-black/20 custom-scrollbar max-h-[500px]">
+                        <table className="min-w-full text-sm text-left border-separate border-spacing-0">
+                          <thead className="sticky top-0 z-10 bg-[#1a2318]">
+                            <tr className="text-gray-400 border-b border-white/10">
                               {Object.keys(displayRows[0]).map((col) => (
-                                <th key={col} className="pb-3 pr-4 font-semibold uppercase tracking-wider whitespace-nowrap">
+                                <th key={col} className="py-5 px-6 font-black uppercase tracking-[0.2em] text-[10px] border-b border-white/10">
                                   {col === 'score_value' ? 'FCL' : col.replace(/_/g, ' ')}
                                 </th>
                               ))}
@@ -3219,9 +3409,9 @@ const Dashboard = () => {
                           </thead>
                           <tbody>
                             {displayRows.map((row, idx) => (
-                              <tr key={idx} className="border-b border-white/10 hover:bg-white/5 transition-colors">
+                              <tr key={idx} className="border-b border-white/5 hover:bg-white/5 transition-colors">
                                 {Object.keys(displayRows[0]).map((col) => (
-                                  <td key={col} className="py-2 pr-4 text-gray-100 whitespace-nowrap">
+                                  <td key={col} className="py-4 px-6 text-gray-100 whitespace-nowrap border-b border-white/5 font-medium tracking-wide">
                                     {(() => {
                                       const value = (row as any)[col];
                                       if (value === undefined || value === null) return '-';
@@ -3255,19 +3445,27 @@ const Dashboard = () => {
                   const displayRows = filterStageRowsByVariant(amazonResults, ['keyword', 'search_category'], 'keyword');
                   if (!displayRows || displayRows.length === 0) return null;
                   return (
-                    <div className="mb-8 p-6 bg-[#2a3627] rounded shadow-xl border border-white/10">
-                      <div className="flex justify-between items-center mb-4">
-                        <h3 className="text-2xl font-bold text-[#C0FE72] tracking-wider">AMAZON MARKETPLACE STAGE</h3>
-                        <div className="text-sm text-gray-300">
-                          {amazonMeta?.message || 'Amazon raw cleaned + converted to parquet'} · Rows: {amazonMeta?.rows ?? displayRows.length}
+                    <div className="mb-8 p-8 bg-white/5 backdrop-blur-md rounded-2xl shadow-2xl border border-white/10 relative overflow-hidden group">
+                      <div className="absolute top-0 left-0 w-1 h-full bg-blue-500/50 group-hover:bg-blue-500 transition-all" />
+                      <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-5 mb-8">
+                        <div>
+                          <h3 className="text-2xl font-extrabold text-[#C0FE72] tracking-[0.2em] uppercase">AMAZON MARKETPLACE STAGE</h3>
+                          <div className="text-[10px] text-gray-500 font-bold tracking-widest uppercase mt-1">
+                            {amazonMeta?.message || 'Cleaned Market Intelligence Data'}
+                          </div>
+                        </div>
+                        <div className="flex items-center gap-3">
+                          <span className="px-4 py-1.5 bg-blue-500/10 border border-blue-500/20 rounded-full text-blue-400 text-[10px] font-black tracking-widest uppercase">
+                            {amazonMeta?.rows ?? displayRows.length} ROWS
+                          </span>
                         </div>
                       </div>
-                      <div className="overflow-x-auto">
-                        <table className="w-full text-sm text-left border-collapse">
-                          <thead>
-                            <tr className="border-b border-white/30 text-gray-300">
+                      <div className="overflow-x-auto rounded-xl border border-white/10 bg-black/20 custom-scrollbar max-h-[500px]">
+                        <table className="min-w-full text-sm text-left border-separate border-spacing-0">
+                          <thead className="sticky top-0 z-10 bg-[#1a2318]">
+                            <tr className="text-gray-400 border-b border-white/10">
                               {Object.keys(displayRows[0]).map((col) => (
-                                <th key={col} className="pb-3 pr-4 font-semibold uppercase tracking-wider whitespace-nowrap">
+                                <th key={col} className="py-5 px-6 font-black uppercase tracking-[0.2em] text-[10px] border-b border-white/10">
                                   {col.replace(/_/g, ' ')}
                                 </th>
                               ))}
@@ -3305,19 +3503,27 @@ const Dashboard = () => {
                   const displayRows = filterStageRowsByVariant(alibabaResults, ['keyword', 'search_category'], 'keyword');
                   if (!displayRows || displayRows.length === 0) return null;
                   return (
-                    <div className="mb-8 p-6 bg-[#2a3627] rounded shadow-xl border border-white/10">
-                      <div className="flex justify-between items-center mb-4">
-                        <h3 className="text-2xl font-bold text-[#C0FE72] tracking-wider">ALIBABA MARKETPLACE STAGE</h3>
-                        <div className="text-sm text-gray-300">
-                          {alibabaMeta?.message || 'Alibaba raw cleaned + converted'} · Rows: {alibabaMeta?.rows ?? displayRows.length}
+                    <div className="mb-8 p-8 bg-white/5 backdrop-blur-md rounded-2xl shadow-2xl border border-white/10 relative overflow-hidden group">
+                      <div className="absolute top-0 left-0 w-1 h-full bg-orange-500/50 group-hover:bg-orange-500 transition-all" />
+                      <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-5 mb-8">
+                        <div>
+                          <h3 className="text-2xl font-extrabold text-[#C0FE72] tracking-[0.2em] uppercase">ALIBABA MARKETPLACE STAGE</h3>
+                          <div className="text-[10px] text-gray-500 font-bold tracking-widest uppercase mt-1">
+                            {alibabaMeta?.message || 'Supplier Sourcing Intelligence'}
+                          </div>
+                        </div>
+                        <div className="flex items-center gap-3">
+                          <span className="px-4 py-1.5 bg-orange-500/10 border border-orange-500/20 rounded-full text-orange-400 text-[10px] font-black tracking-widest uppercase">
+                            {alibabaMeta?.rows ?? displayRows.length} ROWS
+                          </span>
                         </div>
                       </div>
-                      <div className="overflow-x-auto">
-                        <table className="w-full text-sm text-left border-collapse">
-                          <thead>
-                            <tr className="border-b border-white/30 text-gray-300">
+                      <div className="overflow-x-auto rounded-xl border border-white/10 bg-black/20 custom-scrollbar max-h-[500px]">
+                        <table className="min-w-full text-sm text-left border-separate border-spacing-0">
+                          <thead className="sticky top-0 z-10 bg-[#1a2318]">
+                            <tr className="text-gray-400 border-b border-white/10">
                               {Object.keys(displayRows[0]).map((col) => (
-                                <th key={col} className="pb-3 pr-4 font-semibold uppercase tracking-wider whitespace-nowrap">
+                                <th key={col} className="py-5 px-6 font-black uppercase tracking-[0.2em] text-[10px] border-b border-white/10">
                                   {col.replace(/_/g, ' ')}
                                 </th>
                               ))}
