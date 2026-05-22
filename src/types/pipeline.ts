@@ -51,15 +51,14 @@ export function normalizePipelineSummary(raw: unknown): PipelineSummary | null {
 
   const obj = raw as Record<string, unknown>;
 
-  if (
-    typeof obj.pipeline_status === 'string' &&
-    typeof obj.message === 'string' &&
-    obj.stages &&
-    typeof obj.stages === 'object'
-  ) {
+  if (typeof obj.pipeline_status === 'string' && obj.stages && typeof obj.stages === 'object') {
+    const status = obj.pipeline_status as PipelineStatus;
     return {
-      pipeline_status: obj.pipeline_status as PipelineStatus,
-      message: obj.message,
+      pipeline_status: status,
+      message:
+        typeof obj.message === 'string'
+          ? obj.message
+          : `Pipeline execution completed with status ${status}`,
       stages: obj.stages as PipelineSummary['stages'],
       ...(typeof obj.generated_at === 'string' ? { generated_at: obj.generated_at } : {}),
     };
@@ -131,30 +130,44 @@ export function hasPipelineStageData(summary: PipelineSummary | null | undefined
   return Object.keys(summary.stages).length > 0;
 }
 
+/** True when we should keep polling DescribeExecution for business summary */
+export function needsBusinessSummaryRefresh(exec: CategoryExecution): boolean {
+  if (!exec.execution_arn) return false;
+  if (exec.pipeline_summary?.pipeline_status) return false;
+  if (exec.status === 'PENDING' || exec.status === 'STARTING') return false;
+  return isTerminalAwsStatus(exec.status) || exec.status === 'RUNNING';
+}
+
 /** Resolve business pipeline status for a category child execution */
 export function getCategoryExecutionPipelineStatus(
   exec: CategoryExecution
-): PipelineStatus | 'RUNNING' | 'PENDING' | 'ABORTED' {
-  // Prefer resolver output over a stale pipeline_status field from an earlier poll
+): PipelineStatus | 'RUNNING' | 'PENDING' | 'ABORTED' | 'FAILED' {
   if (exec.pipeline_summary?.pipeline_status) {
     return exec.pipeline_summary.pipeline_status;
   }
-  if (exec.pipeline_status) {
-    return exec.pipeline_status;
-  }
-  if (exec.status === 'ABORTED' || exec.status === 'TIMED_OUT') {
-    return exec.status === 'ABORTED' ? 'ABORTED' : 'FAILED';
-  }
+
   if (exec.status === 'PENDING' || exec.status === 'STARTING' || !exec.status) {
     return 'PENDING';
   }
+
   if (!isTerminalAwsStatus(exec.status)) {
     return 'RUNNING';
   }
-  // AWS finished but resolver summary not loaded yet — avoid flashing FAILED
-  if (exec.status === 'SUCCEEDED' && !exec.pipeline_summary) {
+
+  // Trigger failed — no Step Function ARN was assigned
+  if (!exec.execution_arn && exec.status === 'FAILED') {
+    return 'FAILED';
+  }
+
+  // AWS SUCCEEDED but resolver summary not loaded yet
+  if (exec.execution_arn && exec.status === 'SUCCEEDED' && !exec.pipeline_summary) {
     return 'RUNNING';
   }
+
+  if (exec.status === 'ABORTED' || exec.status === 'TIMED_OUT') {
+    return exec.status === 'ABORTED' ? 'ABORTED' : 'FAILED';
+  }
+
   const business = getBusinessPipelineStatus(exec.status, exec.pipeline_summary);
   return business === 'ABORTED' ? 'ABORTED' : business;
 }

@@ -15,6 +15,7 @@ import {
   PipelineSummary,
   aggregatePipelineStatuses,
   hasPipelineStageData,
+  needsBusinessSummaryRefresh,
 } from '@/types/pipeline';
 
 // Countries with geo codes - moved outside component since it's static
@@ -338,30 +339,52 @@ const Dashboard = () => {
   // For CATEGORY BASED mode: currently selected category variant keyword filter
   const [selectedCategoryVariant, setSelectedCategoryVariant] = useState<string>('ALL');
   const [isVariantFetching, setIsVariantFetching] = useState(false);
+  const [isVariantStagesLoading, setIsVariantStagesLoading] = useState(false);
+  const [stageDataVariant, setStageDataVariant] = useState<string | null>(null);
+  const variantFetchIdRef = useRef(0);
+
+  /** Normalized selected variant keyword (null = ALL / none) — safe for .trim() and comparisons */
+  const selectedVariantKey = useMemo((): string | null => {
+    const raw = selectedCategoryVariant;
+    if (raw == null || raw === '' || raw === 'ALL') return null;
+    return String(raw).trim();
+  }, [selectedCategoryVariant]);
 
   // When in CATEGORY BASED mode and user selects a specific keyword, use that execution's ARN for stage data (Keyword Planner, Trends, Amazon, Alibaba)
   const effectiveStageArn = useMemo(() => {
-    if (searchingMode === 'CATEGORY BASED' && selectedCategoryVariant && selectedCategoryVariant !== 'ALL') {
-      const selected = selectedCategoryVariant.trim();
-      const exec = categoryExecutions.find((e) => (e.keyword ?? '').trim() === selected);
+    if (searchingMode === 'CATEGORY BASED' && selectedVariantKey) {
+      const exec = categoryExecutions.find((e) => (e.keyword ?? '').trim() === selectedVariantKey);
       return exec?.execution_arn ?? null;
     }
     return executionArn;
-  }, [searchingMode, selectedCategoryVariant, categoryExecutions, executionArn]);
+  }, [searchingMode, selectedVariantKey, categoryExecutions, executionArn]);
 
-  const selectedCategoryExec = useMemo(() => {
-    if (searchingMode !== 'CATEGORY BASED' || !selectedCategoryVariant || selectedCategoryVariant === 'ALL') {
+  const variantExecutionArn = useMemo(() => {
+    if (searchingMode !== 'CATEGORY BASED' || !selectedVariantKey) {
       return null;
     }
-    const selected = selectedCategoryVariant.trim();
-    return categoryExecutions.find((e) => (e.keyword ?? '').trim() === selected) ?? null;
-  }, [searchingMode, selectedCategoryVariant, categoryExecutions]);
+    return categoryExecutions.find((e) => (e.keyword ?? '').trim() === selectedVariantKey)?.execution_arn ?? null;
+  }, [searchingMode, selectedVariantKey, categoryExecutions]);
+
+  const selectedCategoryExec = useMemo(() => {
+    if (searchingMode !== 'CATEGORY BASED' || !selectedVariantKey) {
+      return null;
+    }
+    return categoryExecutions.find((e) => (e.keyword ?? '').trim() === selectedVariantKey) ?? null;
+  }, [searchingMode, selectedVariantKey, categoryExecutions]);
 
   /** Summary used by Pipeline Execution Hub and stage cards (variant-scoped in category mode) */
   const activePipelineSummary = useMemo((): PipelineSummary | null => {
     if (searchingMode === 'CATEGORY BASED') {
       if (selectedCategoryVariant && selectedCategoryVariant !== 'ALL') {
-        return selectedCategoryExec?.pipeline_summary ?? null;
+        if (selectedCategoryExec?.pipeline_summary) {
+          return selectedCategoryExec.pipeline_summary;
+        }
+        // Same render cycle: status fetch may update pipelineSummary before categoryExecutions
+        if (pipelineSummary && hasPipelineStageData(pipelineSummary)) {
+          return pipelineSummary;
+        }
+        return null;
       }
       return null;
     }
@@ -374,9 +397,16 @@ const Dashboard = () => {
   ]);
 
   const isCategoryVariantView =
-    searchingMode === 'CATEGORY BASED' &&
-    !!selectedCategoryVariant &&
-    selectedCategoryVariant !== 'ALL';
+    searchingMode === 'CATEGORY BASED' && selectedVariantKey !== null;
+
+  const categoryPendingSummaryKey = useMemo(
+    () =>
+      categoryExecutions
+        .filter(needsBusinessSummaryRefresh)
+        .map((e) => e.keyword)
+        .join('|'),
+    [categoryExecutions]
+  );
 
   // Keyword Planner stage data
   const [keywordPlannerResults, setKeywordPlannerResults] = useState<any[] | null>(null);
@@ -464,19 +494,21 @@ const Dashboard = () => {
 
   const getOverallPipelineStatus = useCallback(() => {
     if (searchingMode === 'CATEGORY BASED' && categoryExecutions.length > 0) {
-      if (selectedCategoryVariant && selectedCategoryVariant !== 'ALL') {
+      if (selectedVariantKey) {
         const exec = categoryExecutions.find(
-          (e) => (e.keyword ?? '').trim() === selectedCategoryVariant.trim()
+          (e) => (e.keyword ?? '').trim() === selectedVariantKey
         );
-        if (isVariantFetching) {
-          return 'RUNNING';
-        }
         if (exec) {
-          if (activePipelineSummary?.pipeline_status && hasPipelineStageData(activePipelineSummary)) {
+          if (activePipelineSummary?.pipeline_status) {
             return activePipelineSummary.pipeline_status;
           }
-          const variantStatus = getCategoryExecutionPipelineStatus(exec);
-          return variantStatus;
+          if (exec.pipeline_summary?.pipeline_status) {
+            return exec.pipeline_summary.pipeline_status;
+          }
+          if (isVariantFetching || needsBusinessSummaryRefresh(exec)) {
+            return 'RUNNING';
+          }
+          return getCategoryExecutionPipelineStatus(exec);
         }
         return 'PENDING';
       } else {
@@ -535,22 +567,30 @@ const Dashboard = () => {
       return { status: 'SKIPPED', message: 'Alibaba stage disabled in filters', rows: null };
     }
 
-    // Category variant: wait for resolver summary — do not guess SUCCEEDED from S3 row counts alone
-    if (isCategoryVariantView) {
-      if (isVariantFetching || !hasPipelineStageData(activePipelineSummary)) {
+    const variantSummary =
+      activePipelineSummary ?? selectedCategoryExec?.pipeline_summary ?? null;
+
+    // Category variant: use resolver stages when available; only show loading without summary
+    if (isCategoryVariantView && !hasPipelineStageData(variantSummary)) {
+      if (isVariantFetching) {
         return {
-          status: isVariantFetching ? 'RUNNING' : 'PENDING',
-          message: isVariantFetching
-            ? 'Loading pipeline status for this variant...'
-            : 'Waiting for pipeline summary...',
+          status: 'RUNNING',
+          message: 'Loading pipeline status for this variant...',
+          rows: null,
+        };
+      }
+      if (variantSummary?.pipeline_status) {
+        return {
+          status: 'RUNNING',
+          message: 'Loading per-stage status from pipeline summary...',
           rows: null,
         };
       }
     }
 
     // 2. Resolve stage info from active pipeline summary if available
-    if (activePipelineSummary && hasPipelineStageData(activePipelineSummary)) {
-      const stages = activePipelineSummary.stages;
+    if (variantSummary && hasPipelineStageData(variantSummary)) {
+      const stages = variantSummary.stages;
       let stageObj = null;
       if (stageKey === 'keyword_planner') {
         stageObj = stages.keyword_planner || stages.keyword_planner_clean || stages.google_keyword_planner;
@@ -609,7 +649,39 @@ const Dashboard = () => {
       }
     }
 
-    // 4. If pipeline is completed but stageObj wasn't found (manual mode / legacy)
+    // 4. Category variant: stage tables loaded but resolver stage entry missing — use S3 meta
+    if (isCategoryVariantView && pipelineStatus === 'COMPLETED') {
+      if (stageKey === 'keyword_planner' && hasLoadedKeywordPlanner) {
+        return {
+          status: 'SUCCEEDED',
+          message: keywordPlannerMeta?.message || 'Keyword Planner stage completed',
+          rows: keywordPlannerResults?.length ?? activePipelineSummary?.stages?.keyword_planner?.rows ?? null,
+        };
+      }
+      if (stageKey === 'google_trends' && hasLoadedTrends) {
+        return {
+          status: 'SUCCEEDED',
+          message: trendsMeta?.message || 'Google Trends stage completed',
+          rows: trendsResults?.length ?? activePipelineSummary?.stages?.google_trends?.rows ?? null,
+        };
+      }
+      if (stageKey === 'amazon' && hasLoadedAmazon) {
+        return {
+          status: 'SUCCEEDED',
+          message: amazonMeta?.message || 'Amazon stage completed',
+          rows: amazonResults?.length ?? activePipelineSummary?.stages?.amazon?.rows ?? null,
+        };
+      }
+      if (stageKey === 'alibaba' && hasLoadedAlibaba) {
+        return {
+          status: 'SUCCEEDED',
+          message: alibabaMeta?.message || 'Alibaba stage completed',
+          rows: alibabaResults?.length ?? activePipelineSummary?.stages?.alibaba?.rows ?? null,
+        };
+      }
+    }
+
+    // 5. If pipeline is completed but stageObj wasn't found (manual mode / legacy)
     if (pipelineStatus === 'COMPLETED' && !isCategoryVariantView) {
       if (stageKey === 'keyword_planner') {
         return { status: 'SUCCEEDED', message: 'Keyword Planner stage completed', rows: keywordPlannerResults?.length || null };
@@ -625,7 +697,7 @@ const Dashboard = () => {
       }
     }
 
-    // 5. If pipeline failed (manual mode — category uses resolver summary above)
+    // 6. If pipeline failed (manual mode — category uses resolver summary above)
     if (pipelineStatus === 'FAILED' && !isCategoryVariantView) {
       if (stageKey === 'keyword_planner' && hasLoadedKeywordPlanner) {
         return { status: 'SUCCEEDED', message: 'Keyword Planner stage completed', rows: keywordPlannerResults?.length || null };
@@ -659,7 +731,7 @@ const Dashboard = () => {
     return { status: 'PENDING', message: 'Initial state', rows: null };
   }, [
     pipelineStatus, amazonFilters, alibabaFilters, activePipelineSummary,
-    isCategoryVariantView, isVariantFetching,
+    isCategoryVariantView, isVariantFetching, selectedCategoryExec,
     hasLoadedKeywordPlanner, keywordPlannerMeta, keywordPlannerResults,
     hasLoadedTrends, trendsMeta, trendsResults,
     hasLoadedAmazon, amazonMeta, amazonResults,
@@ -795,11 +867,9 @@ const Dashboard = () => {
             if (overallStatus === 'RUNNING') {
               bannerBg = 'bg-blue-500/5 border-blue-500/20';
               textClass = 'text-blue-300';
-              statusMessageText =
-                summary?.message ||
-                (isVariantFetching
-                  ? 'Loading pipeline status for this variant...'
-                  : statusMessage || 'Pipeline execution in progress. Processing stages sequentially...');
+              statusMessageText = isVariantFetching
+                ? 'Loading pipeline status for this variant...'
+                : statusMessage || 'Pipeline execution in progress. Processing stages sequentially...';
             } else if (overallStatus === 'SUCCEEDED') {
               bannerBg = 'bg-green-500/5 border-green-500/20';
               textClass = 'text-green-300';
@@ -1900,7 +1970,12 @@ const Dashboard = () => {
                 } else {
                   setCategoryExecutions(prev => {
                     const next = [...prev];
-                    next[i] = { ...next[i], status: 'FAILED' };
+                    next[i] = {
+                      ...next[i],
+                      status: 'FAILED',
+                      pipeline_summary: null,
+                      pipeline_status: null,
+                    };
                     return next;
                   });
                 }
@@ -1908,7 +1983,12 @@ const Dashboard = () => {
                 console.error(`Failed to trigger category child for ${kw}:`, e);
                 setCategoryExecutions(prev => {
                   const next = [...prev];
-                  next[i] = { ...next[i], status: 'FAILED' };
+                  next[i] = {
+                    ...next[i],
+                    status: 'FAILED',
+                    pipeline_summary: null,
+                    pipeline_status: null,
+                  };
                   return next;
                 });
               }
@@ -2094,9 +2174,15 @@ const Dashboard = () => {
       }
     } else {
       const exec = categoryExecutions.find((e) => (e.keyword ?? '').trim() === newValue.trim());
-      setPipelineSummary(exec?.pipeline_summary ?? null);
+      const cached = exec?.pipeline_summary ?? null;
+      setPipelineSummary(cached);
+      const hasCachedStatus = !!(cached?.pipeline_status || exec?.pipeline_status);
+      setIsVariantFetching(!hasCachedStatus);
+      setIsVariantStagesLoading(true);
+      setStatusMessage('');
     }
 
+    setStageDataVariant(null);
     setKeywordPlannerResults(null);
     setKeywordPlannerMeta(null);
     setTrendsResults(null);
@@ -2109,122 +2195,150 @@ const Dashboard = () => {
     setHasLoadedTrends(false);
     setHasLoadedAmazon(false);
     setHasLoadedAlibaba(false);
-    if (newValue !== 'ALL') {
-      setIsVariantFetching(true);
-      setStatusMessage('');
+
+    if (newValue === 'ALL') {
+      setIsVariantFetching(false);
+      setIsVariantStagesLoading(false);
     }
   }, [categoryExecutions]);
 
-  // In category mode, when pipeline is completed (or polling), fetch that keyword's stage data
+  // In category mode, fetch status + S3 stage data for the selected variant only
   useEffect(() => {
-    if (searchingMode !== 'CATEGORY BASED' || (pipelineStatus !== 'COMPLETED' && pipelineStatus !== 'POLLING')) return;
+    if (searchingMode !== 'CATEGORY BASED' || (pipelineStatus !== 'COMPLETED' && pipelineStatus !== 'POLLING')) {
+      return;
+    }
 
-    const selected = selectedCategoryVariant?.trim();
-    if (!selected || selected === 'ALL') return;
+    const selected = selectedVariantKey;
+    if (!selected || !variantExecutionArn) return;
 
-    const exec = categoryExecutions.find((e) => (e.keyword ?? '').trim() === selected);
-    const arnToFetch = exec?.execution_arn ?? null;
-    if (!arnToFetch) return;
-
+    const fetchId = ++variantFetchIdRef.current;
     const controller = new AbortController();
+
+    const exec = categoryExecutionsRef.current.find((e) => (e.keyword ?? '').trim() === selected);
+    const cachedSummary = exec?.pipeline_summary ?? null;
+    const hasCachedStatus = !!(cachedSummary?.pipeline_status || exec?.pipeline_status);
+
+    setStageDataVariant(null);
+    setKeywordPlannerResults(null);
+    setKeywordPlannerMeta(null);
+    setTrendsResults(null);
+    setTrendsMeta(null);
+    setAmazonResults(null);
+    setAmazonMeta(null);
+    setAlibabaResults(null);
+    setAlibabaMeta(null);
+    setHasLoadedKeywordPlanner(false);
+    setHasLoadedTrends(false);
+    setHasLoadedAmazon(false);
+    setHasLoadedAlibaba(false);
+
+    if (hasCachedStatus) {
+      setIsVariantFetching(false);
+      if (cachedSummary) setPipelineSummary(cachedSummary);
+    } else {
+      setIsVariantFetching(true);
+    }
+    setIsVariantStagesLoading(true);
+
+    const isCurrentFetch = () =>
+      variantFetchIdRef.current === fetchId && selectedVariantKey === selected;
 
     const fetchStagesForVariant = async (signal: AbortSignal) => {
       try {
-        // Resolve business status first so the hub badge is not stale while stage tables load
         const statusRes = await fetch(
-          `/api/pipeline/status?arn=${encodeURIComponent(arnToFetch)}`,
+          `/api/pipeline/status?arn=${encodeURIComponent(variantExecutionArn)}`,
           { signal }
         );
-        if (signal.aborted) return;
+        if (signal.aborted || !isCurrentFetch()) return;
 
         if (statusRes?.ok) {
           const statusData: ExecutionStatusResponse = await statusRes.json();
-          if (!signal.aborted) {
-            const summary = normalizePipelineSummary(statusData.pipeline_summary);
-            if (summary) {
-              setPipelineSummary(summary);
-              setCategoryExecutions((prev) =>
-                prev.map((e) =>
-                  (e.keyword ?? '').trim() === selected
-                    ? {
-                        ...e,
-                        status: statusData.status || e.status,
-                        pipeline_summary: summary,
-                        pipeline_status: summary.pipeline_status,
-                      }
-                    : e
-                )
-              );
-            }
+          if (!isCurrentFetch()) return;
+
+          const summary = normalizePipelineSummary(statusData.pipeline_summary);
+          if (summary) {
+            setPipelineSummary(summary);
+            setCategoryExecutions((prev) =>
+              prev.map((e) =>
+                (e.keyword ?? '').trim() === selected
+                  ? {
+                      ...e,
+                      status: statusData.status || e.status,
+                      pipeline_summary: summary,
+                      pipeline_status: summary.pipeline_status,
+                    }
+                  : e
+              )
+            );
           }
+          if (isCurrentFetch()) setIsVariantFetching(false);
+        } else if (isCurrentFetch()) {
+          setIsVariantFetching(false);
         }
 
         const [kwpRes, trendsRes, amzRes, aliRes] = await Promise.all([
-          fetch(`/api/pipeline/keyword-planner?arn=${encodeURIComponent(arnToFetch)}`, { signal }),
-          fetch(`/api/pipeline/google-trends?arn=${encodeURIComponent(arnToFetch)}`, { signal }),
-          amazonFilters ? fetch(`/api/pipeline/amazon?arn=${encodeURIComponent(arnToFetch)}`, { signal }) : Promise.resolve(null),
-          alibabaFilters ? fetch(`/api/pipeline/alibaba?arn=${encodeURIComponent(arnToFetch)}`, { signal }) : Promise.resolve(null),
+          fetch(`/api/pipeline/keyword-planner?arn=${encodeURIComponent(variantExecutionArn)}`, { signal }),
+          fetch(`/api/pipeline/google-trends?arn=${encodeURIComponent(variantExecutionArn)}`, { signal }),
+          amazonFilters ? fetch(`/api/pipeline/amazon?arn=${encodeURIComponent(variantExecutionArn)}`, { signal }) : Promise.resolve(null),
+          alibabaFilters ? fetch(`/api/pipeline/alibaba?arn=${encodeURIComponent(variantExecutionArn)}`, { signal }) : Promise.resolve(null),
         ]);
 
-        if (signal.aborted) return;
+        if (signal.aborted || !isCurrentFetch()) return;
 
         if (kwpRes?.ok) {
           const kwpData = await kwpRes.json();
-          if (!signal.aborted) {
+          if (isCurrentFetch()) {
             if (kwpData.success && kwpData.available && kwpData.results?.length > 0) {
               setKeywordPlannerResults(kwpData.results);
             }
-            if (kwpData.meta !== undefined) {
-              setKeywordPlannerMeta(kwpData.meta || null);
-            }
+            if (kwpData.meta !== undefined) setKeywordPlannerMeta(kwpData.meta || null);
             setHasLoadedKeywordPlanner(true);
           }
         }
         if (trendsRes?.ok) {
           const trendsData = await trendsRes.json();
-          if (!signal.aborted) {
+          if (isCurrentFetch()) {
             if (trendsData.success && trendsData.available && trendsData.results?.length > 0) {
               setTrendsResults(trendsData.results);
             }
-            if (trendsData.meta !== undefined) {
-              setTrendsMeta(trendsData.meta || null);
-            }
+            if (trendsData.meta !== undefined) setTrendsMeta(trendsData.meta || null);
             setHasLoadedTrends(true);
           }
         }
         if (amzRes?.ok) {
           const amzData = await amzRes.json();
-          if (!signal.aborted) {
+          if (isCurrentFetch()) {
             if (amzData.success && amzData.available && amzData.results?.length > 0) {
               setAmazonResults(amzData.results);
             }
-            if (amzData.meta !== undefined) {
-              setAmazonMeta(amzData.meta || null);
-            }
+            if (amzData.meta !== undefined) setAmazonMeta(amzData.meta || null);
             setHasLoadedAmazon(true);
           }
         }
         if (aliRes?.ok) {
           const aliData = await aliRes.json();
-          if (!signal.aborted) {
+          if (isCurrentFetch()) {
             if (aliData.success && aliData.available && aliData.results?.length > 0) {
               setAlibabaResults(aliData.results);
             }
-            if (aliData.meta !== undefined) {
-              setAlibabaMeta(aliData.meta || null);
-            }
+            if (aliData.meta !== undefined) setAlibabaMeta(aliData.meta || null);
             setHasLoadedAlibaba(true);
           }
         }
-      } catch (err: any) {
-        if (err.name === 'AbortError') {
+
+        if (isCurrentFetch()) {
+          setStageDataVariant(selected);
+          setIsVariantStagesLoading(false);
+        }
+      } catch (err: unknown) {
+        if ((err as { name?: string }).name === 'AbortError') {
           console.debug('Fetch aborted for variant:', selected);
         } else {
           console.error('Error fetching variant stage data:', err);
         }
-      } finally {
-        if (!signal.aborted) {
+        if (isCurrentFetch()) {
           setIsVariantFetching(false);
+          setIsVariantStagesLoading(false);
         }
       }
     };
@@ -2234,7 +2348,59 @@ const Dashboard = () => {
     return () => {
       controller.abort();
     };
-  }, [searchingMode, pipelineStatus, selectedCategoryVariant, categoryExecutions, amazonFilters, alibabaFilters]);
+  }, [
+    searchingMode,
+    pipelineStatus,
+    selectedVariantKey,
+    variantExecutionArn,
+    amazonFilters,
+    alibabaFilters,
+  ]);
+
+  // Backfill business summaries for category rows that reached AWS terminal before output was parsed
+  useEffect(() => {
+    if (searchingMode !== 'CATEGORY BASED') return;
+    if (pipelineStatus !== 'COMPLETED' && pipelineStatus !== 'POLLING') return;
+
+    const pending = categoryExecutionsRef.current.filter(needsBusinessSummaryRefresh);
+    if (pending.length === 0) return;
+
+    let cancelled = false;
+
+    (async () => {
+      const refreshed = await Promise.all(
+        pending.map(async (exec) => {
+          if (!exec.execution_arn) return exec;
+          try {
+            const res = await fetch(`/api/pipeline/status?arn=${encodeURIComponent(exec.execution_arn)}`);
+            const data: ExecutionStatusResponse = await res.json();
+            const summary = normalizePipelineSummary(data.pipeline_summary);
+            return {
+              ...exec,
+              status: data.status || exec.status,
+              pipeline_summary: summary ?? exec.pipeline_summary ?? null,
+              pipeline_status: summary?.pipeline_status ?? null,
+            };
+          } catch {
+            return exec;
+          }
+        })
+      );
+
+      if (cancelled) return;
+
+      setCategoryExecutions((prev) =>
+        prev.map((exec) => {
+          const updated = refreshed.find((r) => r.keyword === exec.keyword);
+          return updated ?? exec;
+        })
+      );
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [searchingMode, pipelineStatus, categoryPendingSummaryKey]);
 
   // Polling Effect for Pipeline
   useEffect(() => {
@@ -2262,7 +2428,10 @@ const Dashboard = () => {
             if (childStatusCounter >= 3) {
               childStatusCounter = 0;
               const updatedExecutions = await Promise.all(categoryExecutions.map(async (exec) => {
-                if (isTerminalAwsStatus(exec.status)) return exec;
+                // Keep refreshing terminal runs until resolve_pipeline_status output is parsed
+                if (isTerminalAwsStatus(exec.status) && !needsBusinessSummaryRefresh(exec)) {
+                  return exec;
+                }
 
                 // Check for frontend timeout (e.g., 5 minutes)
                 const now = Date.now();
@@ -3709,8 +3878,8 @@ const Dashboard = () => {
                 )}
 
                 {/* Pipeline Execution Hub for selected category variant */}
-                {searchingMode === 'CATEGORY BASED' && categoryExecutions.length > 0 && selectedCategoryVariant !== 'ALL' && (
-                  renderPipelineExecutionHub(selectedCategoryVariant)
+                {searchingMode === 'CATEGORY BASED' && categoryExecutions.length > 0 && selectedVariantKey && (
+                  renderPipelineExecutionHub(selectedVariantKey)
                 )}
                 {searchingMode === 'CATEGORY BASED' && categoryExecutions.length > 0 && selectedCategoryVariant === 'ALL' && (
                   <div className="mb-8 p-5 rounded-xl bg-white/[0.02] border border-white/10 text-center">
@@ -3749,13 +3918,24 @@ const Dashboard = () => {
                 )}
                 {/* Keyword Planner Stage Summary */}
                 {(() => {
-                  if (isVariantFetching && !hasLoadedKeywordPlanner) {
+                  if (
+                    isCategoryVariantView &&
+                    (isVariantStagesLoading || stageDataVariant !== selectedVariantKey) &&
+                    !hasLoadedKeywordPlanner
+                  ) {
                     return (
                       <div className="mb-8 flex flex-col items-center justify-center py-16 bg-[#2a3627] rounded shadow-xl border border-[#C0FE72]/20 animate-pulse">
                         <div className="w-10 h-10 border-4 border-[#C0FE72] border-t-transparent rounded-full animate-spin mb-4" />
                         <p className="text-[#C0FE72] text-sm font-bold tracking-widest uppercase">Fetching Keyword Planner Data...</p>
                       </div>
                     );
+                  }
+                  if (
+                    isCategoryVariantView &&
+                    selectedCategoryVariant !== 'ALL' &&
+                    stageDataVariant !== selectedVariantKey
+                  ) {
+                    return null;
                   }
                   const displayRows = filterStageRowsByVariant(keywordPlannerResults, ['root_keyword', 'sub_keyword', 'keyword'], 'root_keyword');
                   if (!displayRows || displayRows.length === 0) return null;
@@ -3799,13 +3979,24 @@ const Dashboard = () => {
 
                 {/* Google Trends Stage Summary */}
                 {(() => {
-                  if (isVariantFetching && !hasLoadedTrends) {
+                  if (
+                    isCategoryVariantView &&
+                    (isVariantStagesLoading || stageDataVariant !== selectedVariantKey) &&
+                    !hasLoadedTrends
+                  ) {
                     return (
                       <div className="mb-8 flex flex-col items-center justify-center py-16 bg-[#2a3627] rounded shadow-xl border border-[#C0FE72]/20 animate-pulse">
                         <div className="w-10 h-10 border-4 border-[#C0FE72] border-t-transparent rounded-full animate-spin mb-4" />
                         <p className="text-[#C0FE72] text-sm font-bold tracking-widest uppercase">Fetching Google Trends Data...</p>
                       </div>
                     );
+                  }
+                  if (
+                    isCategoryVariantView &&
+                    selectedCategoryVariant !== 'ALL' &&
+                    stageDataVariant !== selectedVariantKey
+                  ) {
+                    return null;
                   }
                   const displayRows = filterStageRowsByVariant(trendsResults, ['keyword'], 'keyword');
                   if (!displayRows || displayRows.length === 0) return null;
@@ -3855,13 +4046,20 @@ const Dashboard = () => {
 
                 {/* Amazon Marketplace Stage */}
                 {(() => {
-                  if (isVariantFetching && !hasLoadedAmazon) {
+                  if (
+                    isCategoryVariantView &&
+                    (isVariantStagesLoading || stageDataVariant !== selectedVariantKey) &&
+                    !hasLoadedAmazon
+                  ) {
                     return (
                       <div className="mb-8 flex flex-col items-center justify-center py-16 bg-[#2a3627] rounded shadow-xl border border-[#C0FE72]/20 animate-pulse">
                         <div className="w-10 h-10 border-4 border-[#C0FE72] border-t-transparent rounded-full animate-spin mb-4" />
                         <p className="text-[#C0FE72] text-sm font-bold tracking-widest uppercase">Fetching Amazon Stage Data...</p>
                       </div>
                     );
+                  }
+                  if (isCategoryVariantView && stageDataVariant !== selectedVariantKey) {
+                    return null;
                   }
                   const displayRows = filterStageRowsByVariant(amazonResults, ['keyword', 'search_category'], 'keyword');
                   if (!displayRows || displayRows.length === 0) return null;
@@ -3905,13 +4103,20 @@ const Dashboard = () => {
 
                 {/* Alibaba Marketplace Stage */}
                 {(() => {
-                  if (isVariantFetching && !hasLoadedAlibaba) {
+                  if (
+                    isCategoryVariantView &&
+                    (isVariantStagesLoading || stageDataVariant !== selectedVariantKey) &&
+                    !hasLoadedAlibaba
+                  ) {
                     return (
                       <div className="mb-8 flex flex-col items-center justify-center py-16 bg-[#2a3627] rounded shadow-xl border border-[#C0FE72]/20 animate-pulse">
                         <div className="w-10 h-10 border-4 border-[#C0FE72] border-t-transparent rounded-full animate-spin mb-4" />
                         <p className="text-[#C0FE72] text-sm font-bold tracking-widest uppercase">Fetching Alibaba Stage Data...</p>
                       </div>
                     );
+                  }
+                  if (isCategoryVariantView && stageDataVariant !== selectedVariantKey) {
+                    return null;
                   }
                   const displayRows = filterStageRowsByVariant(alibabaResults, ['keyword', 'search_category'], 'keyword');
                   if (!displayRows || displayRows.length === 0) return null;
