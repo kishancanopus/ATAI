@@ -3,6 +3,19 @@
 import React, { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import * as XLSX from 'xlsx';
 import { fetchProducts, Product } from '@/lib/productsService';
+import {
+  buildCategoryBatchSummary,
+  CategoryExecution,
+  ExecutionStatusResponse,
+  getBusinessPipelineStatus,
+  getCategoryExecutionPipelineStatus,
+  getPipelineStatusBadgeClasses,
+  isTerminalAwsStatus,
+  normalizePipelineSummary,
+  PipelineSummary,
+  aggregatePipelineStatuses,
+  hasPipelineStageData,
+} from '@/types/pipeline';
 
 // Countries with geo codes - moved outside component since it's static
 const countries = [
@@ -289,13 +302,14 @@ const Dashboard = () => {
   const isLoadingPresetRef = useRef(false);
   const [pipelineStatus, setPipelineStatus] = useState<'IDLE' | 'STARTING' | 'POLLING' | 'COMPLETED' | 'FAILED'>('IDLE');
   const [executionArn, setExecutionArn] = useState<string | null>(null);
+  const [pipelineSummary, setPipelineSummary] = useState<PipelineSummary | null>(null);
   const [statusMessage, setStatusMessage] = useState<string>('');
   const [pollingIntervalRef, setPollingIntervalRef] = useState<NodeJS.Timeout | null>(null);
   const [isBatching, setIsBatching] = useState(false); // Tracking sequential category trigger phase
   const [isPreliminary, setIsPreliminary] = useState(false);
   const [hasPerformedSearch, setHasPerformedSearch] = useState(false);
   const [consolidatedResults, setConsolidatedResults] = useState<any[]>([]);
-  const [categoryExecutions, setCategoryExecutions] = useState<{ keyword: string, run_id: string, execution_arn: string, status?: string, started_at?: number | null }[]>([]);
+  const [categoryExecutions, setCategoryExecutions] = useState<CategoryExecution[]>([]);
   const categoryExecutionsRef = useRef(categoryExecutions);
   useEffect(() => {
     categoryExecutionsRef.current = categoryExecutions;
@@ -334,6 +348,35 @@ const Dashboard = () => {
     }
     return executionArn;
   }, [searchingMode, selectedCategoryVariant, categoryExecutions, executionArn]);
+
+  const selectedCategoryExec = useMemo(() => {
+    if (searchingMode !== 'CATEGORY BASED' || !selectedCategoryVariant || selectedCategoryVariant === 'ALL') {
+      return null;
+    }
+    const selected = selectedCategoryVariant.trim();
+    return categoryExecutions.find((e) => (e.keyword ?? '').trim() === selected) ?? null;
+  }, [searchingMode, selectedCategoryVariant, categoryExecutions]);
+
+  /** Summary used by Pipeline Execution Hub and stage cards (variant-scoped in category mode) */
+  const activePipelineSummary = useMemo((): PipelineSummary | null => {
+    if (searchingMode === 'CATEGORY BASED') {
+      if (selectedCategoryVariant && selectedCategoryVariant !== 'ALL') {
+        return selectedCategoryExec?.pipeline_summary ?? null;
+      }
+      return null;
+    }
+    return pipelineSummary;
+  }, [
+    searchingMode,
+    selectedCategoryVariant,
+    selectedCategoryExec,
+    pipelineSummary,
+  ]);
+
+  const isCategoryVariantView =
+    searchingMode === 'CATEGORY BASED' &&
+    !!selectedCategoryVariant &&
+    selectedCategoryVariant !== 'ALL';
 
   // Keyword Planner stage data
   const [keywordPlannerResults, setKeywordPlannerResults] = useState<any[] | null>(null);
@@ -417,6 +460,437 @@ const Dashboard = () => {
       return rows;
     },
     []
+  );
+
+  const getOverallPipelineStatus = useCallback(() => {
+    if (searchingMode === 'CATEGORY BASED' && categoryExecutions.length > 0) {
+      if (selectedCategoryVariant && selectedCategoryVariant !== 'ALL') {
+        const exec = categoryExecutions.find(
+          (e) => (e.keyword ?? '').trim() === selectedCategoryVariant.trim()
+        );
+        if (isVariantFetching) {
+          return 'RUNNING';
+        }
+        if (exec) {
+          if (activePipelineSummary?.pipeline_status && hasPipelineStageData(activePipelineSummary)) {
+            return activePipelineSummary.pipeline_status;
+          }
+          const variantStatus = getCategoryExecutionPipelineStatus(exec);
+          return variantStatus;
+        }
+        return 'PENDING';
+      } else {
+        const stillRunning = categoryExecutions.some((e) => !isTerminalAwsStatus(e.status));
+        if (stillRunning && (pipelineStatus === 'POLLING' || pipelineStatus === 'STARTING' || isBatching)) {
+          return 'RUNNING';
+        }
+        const resolved = categoryExecutions
+          .map((e) => getCategoryExecutionPipelineStatus(e))
+          .filter(
+            (s): s is 'SUCCEEDED' | 'PARTIALLY_SUCCEEDED' | 'FAILED' =>
+              s === 'SUCCEEDED' || s === 'PARTIALLY_SUCCEEDED' || s === 'FAILED'
+          );
+        if (resolved.length > 0) {
+          const batch = aggregatePipelineStatuses(resolved);
+          return batch === 'RUNNING' ? 'RUNNING' : batch;
+        }
+      }
+    }
+
+    if (pipelineSummary && pipelineSummary.pipeline_status) {
+      return pipelineSummary.pipeline_status;
+    }
+    if (pipelineStatus === 'POLLING' || pipelineStatus === 'STARTING') {
+      return 'RUNNING';
+    }
+    if (pipelineStatus === 'FAILED') {
+      return 'FAILED';
+    }
+    if (pipelineStatus === 'COMPLETED') {
+      return 'SUCCEEDED';
+    }
+    return 'PENDING';
+  }, [
+    pipelineSummary,
+    pipelineStatus,
+    searchingMode,
+    categoryExecutions,
+    selectedCategoryVariant,
+    isBatching,
+    activePipelineSummary,
+    isVariantFetching,
+  ]);
+
+  const getStageStatusAndMeta = useCallback((stageKey: string) => {
+    // If pipeline is idle/starting, all are pending
+    if (pipelineStatus === 'IDLE' || pipelineStatus === 'STARTING') {
+      return { status: 'PENDING', message: 'Waiting to start...', rows: null };
+    }
+
+    // 1. Check if filters are disabled for this stage
+    if (stageKey === 'amazon' && !amazonFilters) {
+      return { status: 'SKIPPED', message: 'Amazon stage disabled in filters', rows: null };
+    }
+    if (stageKey === 'alibaba' && !alibabaFilters) {
+      return { status: 'SKIPPED', message: 'Alibaba stage disabled in filters', rows: null };
+    }
+
+    // Category variant: wait for resolver summary — do not guess SUCCEEDED from S3 row counts alone
+    if (isCategoryVariantView) {
+      if (isVariantFetching || !hasPipelineStageData(activePipelineSummary)) {
+        return {
+          status: isVariantFetching ? 'RUNNING' : 'PENDING',
+          message: isVariantFetching
+            ? 'Loading pipeline status for this variant...'
+            : 'Waiting for pipeline summary...',
+          rows: null,
+        };
+      }
+    }
+
+    // 2. Resolve stage info from active pipeline summary if available
+    if (activePipelineSummary && hasPipelineStageData(activePipelineSummary)) {
+      const stages = activePipelineSummary.stages;
+      let stageObj = null;
+      if (stageKey === 'keyword_planner') {
+        stageObj = stages.keyword_planner || stages.keyword_planner_clean || stages.google_keyword_planner;
+      } else if (stageKey === 'google_trends') {
+        stageObj = stages.google_trends || stages.google_trends_clean || stages.trends;
+      } else if (stageKey === 'amazon') {
+        stageObj = stages.amazon || stages.amazon_clean || stages.amazon_fcl_enrichment;
+      } else if (stageKey === 'alibaba') {
+        stageObj = stages.alibaba || stages.alibaba_clean || stages.alibaba_enrichment;
+      }
+
+      if (stageObj) {
+        return {
+          status: stageObj.status || 'SUCCEEDED',
+          message: stageObj.message || `${toTitleCase(stageKey.replace('_', ' '))} stage completed`,
+          rows: stageObj.rows !== undefined ? stageObj.rows : (stageObj.rows_processed !== undefined ? stageObj.rows_processed : null)
+        };
+      }
+    }
+
+    // 3. Fallback to dynamic local state while polling (running)
+    if (pipelineStatus === 'POLLING') {
+      if (stageKey === 'keyword_planner') {
+        if (hasLoadedKeywordPlanner) {
+          return { status: 'SUCCEEDED', message: keywordPlannerMeta?.message || 'Keyword Planner clean completed', rows: keywordPlannerResults?.length || null };
+        }
+        return { status: 'RUNNING', message: 'Retrieving keyword search volumes...', rows: null };
+      }
+      if (stageKey === 'google_trends') {
+        if (hasLoadedTrends) {
+          return { status: 'SUCCEEDED', message: trendsMeta?.message || 'Google Trends clean completed', rows: trendsResults?.length || null };
+        }
+        if (hasLoadedKeywordPlanner) {
+          return { status: 'RUNNING', message: 'Analyzing keyword popularity & peak interest...', rows: null };
+        }
+        return { status: 'PENDING', message: 'Waiting for Keyword Planner...', rows: null };
+      }
+      if (stageKey === 'amazon') {
+        if (hasLoadedAmazon) {
+          return { status: 'SUCCEEDED', message: amazonMeta?.message || 'Amazon enrichment completed', rows: amazonResults?.length || null };
+        }
+        if (hasLoadedTrends) {
+          return { status: 'RUNNING', message: 'Fetching product listings, reviews & seller data...', rows: null };
+        }
+        return { status: 'PENDING', message: 'Waiting for Google Trends...', rows: null };
+      }
+      if (stageKey === 'alibaba') {
+        if (hasLoadedAlibaba) {
+          return { status: 'SUCCEEDED', message: alibabaMeta?.message || 'Alibaba sourcing data completed', rows: alibabaResults?.length || null };
+        }
+        const prevDone = amazonFilters ? hasLoadedAmazon : hasLoadedTrends;
+        if (prevDone) {
+          return { status: 'RUNNING', message: 'Sourcing supplier MOQs, prices & margins...', rows: null };
+        }
+        return { status: 'PENDING', message: amazonFilters ? 'Waiting for Amazon stage...' : 'Waiting for Google Trends...', rows: null };
+      }
+    }
+
+    // 4. If pipeline is completed but stageObj wasn't found (manual mode / legacy)
+    if (pipelineStatus === 'COMPLETED' && !isCategoryVariantView) {
+      if (stageKey === 'keyword_planner') {
+        return { status: 'SUCCEEDED', message: 'Keyword Planner stage completed', rows: keywordPlannerResults?.length || null };
+      }
+      if (stageKey === 'google_trends') {
+        return { status: 'SUCCEEDED', message: 'Google Trends stage completed', rows: trendsResults?.length || null };
+      }
+      if (stageKey === 'amazon') {
+        return { status: 'SUCCEEDED', message: 'Amazon stage completed', rows: amazonResults?.length || null };
+      }
+      if (stageKey === 'alibaba') {
+        return { status: 'SUCCEEDED', message: 'Alibaba stage completed', rows: alibabaResults?.length || null };
+      }
+    }
+
+    // 5. If pipeline failed (manual mode — category uses resolver summary above)
+    if (pipelineStatus === 'FAILED' && !isCategoryVariantView) {
+      if (stageKey === 'keyword_planner' && hasLoadedKeywordPlanner) {
+        return { status: 'SUCCEEDED', message: 'Keyword Planner stage completed', rows: keywordPlannerResults?.length || null };
+      }
+      if (stageKey === 'google_trends' && hasLoadedTrends) {
+        return { status: 'SUCCEEDED', message: 'Google Trends stage completed', rows: trendsResults?.length || null };
+      }
+      if (stageKey === 'amazon' && hasLoadedAmazon) {
+        return { status: 'SUCCEEDED', message: 'Amazon stage completed', rows: amazonResults?.length || null };
+      }
+      if (stageKey === 'alibaba' && hasLoadedAlibaba) {
+        return { status: 'SUCCEEDED', message: 'Alibaba stage completed', rows: alibabaResults?.length || null };
+      }
+
+      if (stageKey === 'keyword_planner') return { status: 'FAILED', message: 'Keyword Planner execution failed', rows: null };
+      if (stageKey === 'google_trends') {
+        if (hasLoadedKeywordPlanner) return { status: 'FAILED', message: 'Google Trends execution failed', rows: null };
+        return { status: 'PENDING', message: 'Pipeline failed before starting trends', rows: null };
+      }
+      if (stageKey === 'amazon') {
+        if (hasLoadedTrends) return { status: 'FAILED', message: 'Amazon execution failed', rows: null };
+        return { status: 'PENDING', message: 'Pipeline failed before starting Amazon', rows: null };
+      }
+      if (stageKey === 'alibaba') {
+        const prevDone = amazonFilters ? hasLoadedAmazon : hasLoadedTrends;
+        if (prevDone) return { status: 'FAILED', message: 'Alibaba execution failed', rows: null };
+        return { status: 'PENDING', message: 'Pipeline failed before starting Alibaba', rows: null };
+      }
+    }
+
+    return { status: 'PENDING', message: 'Initial state', rows: null };
+  }, [
+    pipelineStatus, amazonFilters, alibabaFilters, activePipelineSummary,
+    isCategoryVariantView, isVariantFetching,
+    hasLoadedKeywordPlanner, keywordPlannerMeta, keywordPlannerResults,
+    hasLoadedTrends, trendsMeta, trendsResults,
+    hasLoadedAmazon, amazonMeta, amazonResults,
+    hasLoadedAlibaba, alibabaMeta, alibabaResults
+  ]);
+
+  const renderStageCard = (
+    title: string,
+    status: string,
+    message: string,
+    rows: number | null,
+    icon: React.ReactNode
+  ) => {
+    let statusClass = 'bg-white/5 text-gray-500 border-white/5';
+    let dotClass = 'bg-gray-500';
+    let isPulse = false;
+
+    if (status === 'SUCCEEDED') {
+      statusClass = 'bg-green-500/10 text-green-400 border-green-500/20';
+      dotClass = 'bg-green-400';
+    } else if (status === 'PARTIALLY_SUCCEEDED') {
+      statusClass = 'bg-orange-500/10 text-orange-400 border-orange-500/20';
+      dotClass = 'bg-orange-400';
+    } else if (status === 'FAILED') {
+      statusClass = 'bg-red-500/10 text-red-400 border-red-500/20';
+      dotClass = 'bg-red-400';
+    } else if (status === 'EMPTY') {
+      statusClass = 'bg-yellow-500/10 text-yellow-400 border-yellow-500/20';
+      dotClass = 'bg-yellow-400';
+    } else if (status === 'SKIPPED') {
+      statusClass = 'bg-white/5 text-gray-400 border-white/10';
+      dotClass = 'bg-gray-400';
+    } else if (status === 'RUNNING') {
+      statusClass = 'bg-blue-500/10 text-blue-400 border-blue-500/20';
+      dotClass = 'bg-blue-400 animate-pulse';
+      isPulse = true;
+    }
+
+    return (
+      <div className={`relative overflow-hidden p-5 bg-white/[0.01] border ${isPulse ? 'border-blue-500/30' : 'border-white/5'} rounded-xl hover:border-white/10 transition-all flex flex-col justify-between min-h-[145px]`}>
+        <div>
+          <div className="flex items-center justify-between gap-2 mb-3">
+            <div className="flex items-center gap-2">
+              <div className={isPulse ? 'text-blue-400' : 'text-gray-400'}>{icon}</div>
+              <h4 className="font-bold text-sm text-gray-200 tracking-wide">{title}</h4>
+            </div>
+            <span className={`inline-flex items-center gap-1.5 px-2 py-0.5 rounded text-[10px] font-extrabold uppercase tracking-wide border ${statusClass}`}>
+              <span className={`w-1.5 h-1.5 rounded-full ${dotClass}`} />
+              {status}
+            </span>
+          </div>
+          <p className="text-xs text-gray-400 line-clamp-2 leading-relaxed">{message}</p>
+        </div>
+        {status !== 'PENDING' && status !== 'SKIPPED' && rows !== null && (
+          <div className="mt-3 flex items-center justify-between border-t border-white/5 pt-2 text-[11px] text-gray-400">
+            <span>Data Output:</span>
+            <span className="font-bold text-gray-200">{rows} row{rows !== 1 ? 's' : ''}</span>
+          </div>
+        )}
+      </div>
+    );
+  };
+
+  const renderPipelineExecutionHub = useCallback(
+    (variantKeyword?: string | null) => {
+      const overallStatus = getOverallPipelineStatus();
+      const summary = activePipelineSummary;
+
+      return (
+        <div className="mb-8 p-6 rounded-2xl bg-white/[0.02] border border-white/10 backdrop-blur-md shadow-2xl relative overflow-hidden">
+          <div className="absolute top-0 right-0 w-80 h-80 bg-blue-500/5 rounded-full blur-[100px] pointer-events-none" />
+          <div className="absolute bottom-0 left-0 w-80 h-80 bg-[#C0FE72]/5 rounded-full blur-[100px] pointer-events-none" />
+
+          <div className="flex flex-col md:flex-row md:items-center justify-between gap-4 mb-6 pb-5 border-b border-white/5 relative z-10">
+            <div>
+              <h3 className="text-lg font-bold text-gray-100 tracking-wider flex items-center gap-2.5 flex-wrap">
+                <span className="flex h-2.5 w-2.5 relative">
+                  {overallStatus === 'RUNNING' && (
+                    <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-blue-400 opacity-75"></span>
+                  )}
+                  <span
+                    className={`relative inline-flex rounded-full h-2.5 w-2.5 ${
+                      overallStatus === 'SUCCEEDED'
+                        ? 'bg-green-400'
+                        : overallStatus === 'PARTIALLY_SUCCEEDED'
+                          ? 'bg-orange-400'
+                          : overallStatus === 'FAILED'
+                            ? 'bg-red-400'
+                            : overallStatus === 'RUNNING'
+                              ? 'bg-blue-400'
+                              : 'bg-gray-500'
+                    }`}
+                  ></span>
+                </span>
+                PIPELINE EXECUTION HUB
+                {variantKeyword && (
+                  <span className="text-sm font-semibold text-[#C0FE72] normal-case tracking-normal">
+                    — {variantKeyword}
+                  </span>
+                )}
+              </h3>
+              <p className="text-xs text-gray-400 mt-1">
+                {variantKeyword
+                  ? `Stage-level status and metrics for the selected variant keyword.`
+                  : 'Real-time pipeline orchestration health, stage-level statuses, and data collection metrics'}
+              </p>
+            </div>
+
+            <div className="flex items-center gap-3">
+              <span
+                className={`inline-flex items-center gap-1.5 px-3 py-1 rounded-lg text-xs font-extrabold uppercase tracking-wide border ${
+                  overallStatus === 'SUCCEEDED'
+                    ? 'bg-green-500/10 text-green-400 border-green-500/20'
+                    : overallStatus === 'PARTIALLY_SUCCEEDED'
+                      ? 'bg-orange-500/10 text-orange-400 border-orange-500/20'
+                      : overallStatus === 'FAILED'
+                        ? 'bg-red-500/10 text-red-400 border-red-500/20'
+                        : overallStatus === 'RUNNING'
+                          ? 'bg-blue-500/10 text-blue-400 border-blue-500/20 animate-pulse'
+                          : 'bg-white/5 text-gray-400 border-white/10'
+                }`}
+              >
+                {overallStatus}
+              </span>
+            </div>
+          </div>
+
+          {(() => {
+            let bannerBg = 'bg-white/[0.01] border-white/5';
+            let textClass = 'text-gray-300';
+            let statusMessageText = '';
+
+            if (overallStatus === 'RUNNING') {
+              bannerBg = 'bg-blue-500/5 border-blue-500/20';
+              textClass = 'text-blue-300';
+              statusMessageText =
+                summary?.message ||
+                (isVariantFetching
+                  ? 'Loading pipeline status for this variant...'
+                  : statusMessage || 'Pipeline execution in progress. Processing stages sequentially...');
+            } else if (overallStatus === 'SUCCEEDED') {
+              bannerBg = 'bg-green-500/5 border-green-500/20';
+              textClass = 'text-green-300';
+              statusMessageText =
+                summary?.message || 'All stages completed successfully. Consolidated results generated.';
+            } else if (overallStatus === 'PARTIALLY_SUCCEEDED') {
+              bannerBg = 'bg-orange-500/5 border-orange-500/20';
+              textClass = 'text-orange-300';
+              statusMessageText =
+                summary?.message ||
+                'Pipeline completed with partial success. Some optional stages were skipped or had warnings.';
+            } else if (overallStatus === 'FAILED') {
+              bannerBg = 'bg-red-500/5 border-red-500/20';
+              textClass = 'text-red-300';
+              statusMessageText =
+                summary?.message || statusMessage || 'Pipeline execution failed during processing.';
+            } else {
+              statusMessageText = 'Pipeline is pending execution.';
+            }
+
+            return (
+              <div
+                className={`p-4 border rounded-xl mb-6 flex flex-col sm:flex-row sm:items-center justify-between gap-3 ${bannerBg} transition-all relative z-10`}
+              >
+                <span className={`text-sm font-semibold tracking-wide ${textClass}`}>{statusMessageText}</span>
+                {summary?.generated_at && (
+                  <span className="text-xs text-gray-500 whitespace-nowrap">
+                    Completed:{' '}
+                    {new Date(summary.generated_at).toLocaleTimeString([], {
+                      hour: '2-digit',
+                      minute: '2-digit',
+                      second: '2-digit',
+                    })}
+                  </span>
+                )}
+              </div>
+            );
+          })()}
+
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4 relative z-10">
+            {renderStageCard(
+              'Keyword Planner',
+              getStageStatusAndMeta('keyword_planner').status,
+              getStageStatusAndMeta('keyword_planner').message,
+              getStageStatusAndMeta('keyword_planner').rows,
+              <svg className="w-5 h-5" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" />
+              </svg>
+            )}
+            {renderStageCard(
+              'Google Trends',
+              getStageStatusAndMeta('google_trends').status,
+              getStageStatusAndMeta('google_trends').message,
+              getStageStatusAndMeta('google_trends').rows,
+              <svg className="w-5 h-5" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" d="M13 7h8m0 0v8m0-8l-8 8-4-4-6 6" />
+              </svg>
+            )}
+            {renderStageCard(
+              'Amazon USA',
+              getStageStatusAndMeta('amazon').status,
+              getStageStatusAndMeta('amazon').message,
+              getStageStatusAndMeta('amazon').rows,
+              <svg className="w-5 h-5" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" d="M16 11V7a4 4 0 00-8 0v4M5 9h14l1 12H4L5 9z" />
+              </svg>
+            )}
+            {renderStageCard(
+              'Alibaba Sourcing',
+              getStageStatusAndMeta('alibaba').status,
+              getStageStatusAndMeta('alibaba').message,
+              getStageStatusAndMeta('alibaba').rows,
+              <svg className="w-5 h-5" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24">
+                <path
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                  d="M19 21V5a2 2 0 00-2-2H7a2 2 0 00-2 2v16m14 0h2m-2 0h-5m-9 0H3m2 0h5M9 7h1m-1 4h1m4-4h1m-1 4h1m-5 10v-5a1 1 0 011-1h2a1 1 0 011 1v5m-4 0h4"
+                />
+              </svg>
+            )}
+          </div>
+        </div>
+      );
+    },
+    [
+      getOverallPipelineStatus,
+      activePipelineSummary,
+      statusMessage,
+      getStageStatusAndMeta,
+      renderStageCard,
+    ]
   );
 
   // Export current consolidated results as a single Excel file.
@@ -516,6 +990,7 @@ const Dashboard = () => {
     setError(null);
     setPipelineStatus('IDLE');
     setExecutionArn(null);
+    setPipelineSummary(null);
     setStatusMessage('');
     setIsPreliminary(false);
     setCategoryExecutions([]);
@@ -609,6 +1084,7 @@ const Dashboard = () => {
     setError(null);
     setPipelineStatus('IDLE');
     setExecutionArn(null);
+    setPipelineSummary(null);
     setStatusMessage('');
     setIsPreliminary(false);
     setHasPerformedSearch(false);
@@ -673,6 +1149,7 @@ const Dashboard = () => {
     setError(null);
     setPipelineStatus('IDLE');
     setExecutionArn(null);
+    setPipelineSummary(null);
     setStatusMessage('');
     setIsPreliminary(false);
     setCategoryExecutions([]);
@@ -803,7 +1280,7 @@ const Dashboard = () => {
 
     // Collect all numeric values for normalisation
     const allSearchVol: number[] = [];
-    const allTrendPeak: number[] = [];
+    const allTrendAvg: number[] = [];
     const allReviews: number[] = [];
     const allPrices: number[] = [];
     const allMoq: number[] = [];
@@ -822,14 +1299,14 @@ const Dashboard = () => {
       const aliMatch = matchFuzzy(aliRows, kw, ['keyword', 'search_category'], 'title', scopedAli);
 
       const sv = Number(kwpMatch?.avg_monthly_searches ?? row.avg_monthly_searches ?? 0);
-      const tp = Number(trendMatch?.gt_interest_peak ?? trendMatch?.interest_peak ?? 0);
+      const ta = Number(trendMatch?.gt_interest_avg ?? trendMatch?.interest_avg ?? 0);
       const reviews = Number(amzMatch?.reviews_count ?? 0);
       const price = Number(amzMatch?.amazon_price_usd ?? amzMatch?.base_price_usd ?? 0);
       const moq = Number(aliMatch?.moq ?? 0);
       const rating = Number(amzMatch?.rating ?? aliMatch?.supplier_rating ?? 0);
 
       if (sv > 0) allSearchVol.push(sv);
-      if (tp > 0) allTrendPeak.push(tp);
+      if (ta > 0) allTrendAvg.push(ta);
       if (reviews > 0) allReviews.push(reviews);
       if (price > 0) allPrices.push(price);
       if (moq > 0) allMoq.push(moq);
@@ -838,7 +1315,7 @@ const Dashboard = () => {
 
     const maxOrOne = (arr: number[]) => arr.length > 0 ? Math.max(...arr) : 1;
     const maxSV = maxOrOne(allSearchVol);
-    const maxTP = maxOrOne(allTrendPeak);
+    const maxTA = maxOrOne(allTrendAvg);
     const maxReviews = maxOrOne(allReviews);
     const maxPrice = maxOrOne(allPrices);
     const maxMoq = maxOrOne(allMoq);
@@ -884,7 +1361,7 @@ const Dashboard = () => {
 
       // ── Scores (0–100)
       const demandScore = maxSV > 0 ? Math.round((avgMonthlySearches / maxSV) * 100) : 0;
-      const trendScore = maxTP > 0 ? Math.round((trendPeak / maxTP) * 100) : 0;
+      const trendScore = maxTA > 0 ? Math.round((trendAvg / maxTA) * 100) : 0;
       // Lower Amazon reviews = less competition (easier market entry)
       const competitionScore = maxReviews > 0 ? Math.round((1 - Math.min(reviews / maxReviews, 1)) * 100) : 100;
       const priceScore = maxPrice > 0 && amazonPrice > 0 ? Math.round(Math.min((amazonPrice / maxPrice) * 100, 100)) : 0;
@@ -969,7 +1446,14 @@ const Dashboard = () => {
         try {
           const fetchPromises = categoryExecutions.map(async (exec) => {
             const arn = exec.execution_arn;
-            if (!arn || exec.status !== 'SUCCEEDED') {
+            const pipelineHealth = getCategoryExecutionPipelineStatus(exec);
+            const includeData =
+              arn &&
+              isTerminalAwsStatus(exec.status) &&
+              pipelineHealth !== 'FAILED' &&
+              pipelineHealth !== 'ABORTED' &&
+              pipelineHealth !== 'PENDING';
+            if (!includeData) {
               return { kwp: [], trends: [], amz: [], ali: [] };
             }
 
@@ -1231,6 +1715,7 @@ const Dashboard = () => {
     setIsPreliminary(false);
     setPipelineStatus('IDLE');
     setExecutionArn(null);
+    setPipelineSummary(null);
     setStatusMessage('');
     setHasPerformedSearch(true);
     setSelectedCategoryVariant('ALL');
@@ -1600,6 +2085,18 @@ const Dashboard = () => {
   const handleCategoryVariantChange = useCallback((newValue: string) => {
     setSelectedCategoryVariant(newValue);
     setProducts([]);
+
+    if (newValue === 'ALL') {
+      if (categoryExecutions.length > 0) {
+        setPipelineSummary(buildCategoryBatchSummary(categoryExecutions));
+      } else {
+        setPipelineSummary(null);
+      }
+    } else {
+      const exec = categoryExecutions.find((e) => (e.keyword ?? '').trim() === newValue.trim());
+      setPipelineSummary(exec?.pipeline_summary ?? null);
+    }
+
     setKeywordPlannerResults(null);
     setKeywordPlannerMeta(null);
     setTrendsResults(null);
@@ -1614,8 +2111,9 @@ const Dashboard = () => {
     setHasLoadedAlibaba(false);
     if (newValue !== 'ALL') {
       setIsVariantFetching(true);
+      setStatusMessage('');
     }
-  }, []);
+  }, [categoryExecutions]);
 
   // In category mode, when pipeline is completed (or polling), fetch that keyword's stage data
   useEffect(() => {
@@ -1629,10 +2127,38 @@ const Dashboard = () => {
     if (!arnToFetch) return;
 
     const controller = new AbortController();
-    let timeoutId: NodeJS.Timeout | null = null;
 
     const fetchStagesForVariant = async (signal: AbortSignal) => {
       try {
+        // Resolve business status first so the hub badge is not stale while stage tables load
+        const statusRes = await fetch(
+          `/api/pipeline/status?arn=${encodeURIComponent(arnToFetch)}`,
+          { signal }
+        );
+        if (signal.aborted) return;
+
+        if (statusRes?.ok) {
+          const statusData: ExecutionStatusResponse = await statusRes.json();
+          if (!signal.aborted) {
+            const summary = normalizePipelineSummary(statusData.pipeline_summary);
+            if (summary) {
+              setPipelineSummary(summary);
+              setCategoryExecutions((prev) =>
+                prev.map((e) =>
+                  (e.keyword ?? '').trim() === selected
+                    ? {
+                        ...e,
+                        status: statusData.status || e.status,
+                        pipeline_summary: summary,
+                        pipeline_status: summary.pipeline_status,
+                      }
+                    : e
+                )
+              );
+            }
+          }
+        }
+
         const [kwpRes, trendsRes, amzRes, aliRes] = await Promise.all([
           fetch(`/api/pipeline/keyword-planner?arn=${encodeURIComponent(arnToFetch)}`, { signal }),
           fetch(`/api/pipeline/google-trends?arn=${encodeURIComponent(arnToFetch)}`, { signal }),
@@ -1703,13 +2229,9 @@ const Dashboard = () => {
       }
     };
 
-    // Small debounce to avoid hammering server while scrolling through variants
-    timeoutId = setTimeout(() => {
-      fetchStagesForVariant(controller.signal);
-    }, 250);
+    fetchStagesForVariant(controller.signal);
 
     return () => {
-      if (timeoutId) clearTimeout(timeoutId);
       controller.abort();
     };
   }, [searchingMode, pipelineStatus, selectedCategoryVariant, categoryExecutions, amazonFilters, alibabaFilters]);
@@ -1726,9 +2248,11 @@ const Dashboard = () => {
         try {
           // 1. Check Status of Main (or Virtual) Execution
           const statusRes = await fetch(`/api/pipeline/status?arn=${executionArn}`);
-          const statusData = await statusRes.json();
+          const statusData: ExecutionStatusResponse = await statusRes.json();
 
-          let currentStatus = statusData.status;
+          let summary = normalizePipelineSummary(statusData.pipeline_summary);
+          let awsStatus = statusData.status;
+          let categoryAllFinished = false;
 
           // 2. Special handling for Category Based search: track individual keyword executions
           if (searchingMode === 'CATEGORY BASED' && categoryExecutions.length > 0) {
@@ -1738,7 +2262,7 @@ const Dashboard = () => {
             if (childStatusCounter >= 3) {
               childStatusCounter = 0;
               const updatedExecutions = await Promise.all(categoryExecutions.map(async (exec) => {
-                if (exec.status === 'SUCCEEDED' || exec.status === 'FAILED' || exec.status === 'ABORTED' || exec.status === 'TIMED_OUT') return exec;
+                if (isTerminalAwsStatus(exec.status)) return exec;
 
                 // Check for frontend timeout (e.g., 5 minutes)
                 const now = Date.now();
@@ -1751,9 +2275,17 @@ const Dashboard = () => {
                 if (exec.status === 'PENDING' || exec.status === 'STARTING' || !exec.execution_arn) return exec;
 
                 try {
-                  const res = await fetch(`/api/pipeline/status?arn=${exec.execution_arn}`);
-                  const data = await res.json();
-                  return { ...exec, status: data.status || exec.status };
+                  const res = await fetch(`/api/pipeline/status?arn=${encodeURIComponent(exec.execution_arn)}`);
+                  const data: ExecutionStatusResponse = await res.json();
+                  const summary = normalizePipelineSummary(data.pipeline_summary);
+                  const awsStatus = data.status || exec.status;
+
+                  return {
+                    ...exec,
+                    status: awsStatus,
+                    pipeline_summary: summary ?? exec.pipeline_summary ?? null,
+                    pipeline_status: summary?.pipeline_status ?? null,
+                  };
                 } catch (e) {
                   console.error(`Error fetching status for child ${exec.keyword}:`, e);
                   return exec;
@@ -1762,20 +2294,24 @@ const Dashboard = () => {
 
               setCategoryExecutions(updatedExecutions);
 
-              // Check if all children are finished
-              const allFinished = updatedExecutions.every(e =>
-                e.status === 'SUCCEEDED' || e.status === 'FAILED' || e.status === 'ABORTED' || e.status === 'TIMED_OUT'
-              );
+              // Check if all children are finished (AWS terminal)
+              categoryAllFinished = updatedExecutions.every((e) => isTerminalAwsStatus(e.status));
 
-              if (allFinished) {
-                currentStatus = 'SUCCEEDED';
-                const firstExec = updatedExecutions[0];
+              if (categoryAllFinished) {
+                awsStatus = 'SUCCEEDED';
+                summary = buildCategoryBatchSummary(updatedExecutions);
+                const firstExec = updatedExecutions.find((e) => e.execution_arn) ?? updatedExecutions[0];
                 categoryFirstArnWhenFinished = firstExec?.execution_arn ?? null;
                 const firstKeyword = firstExec?.keyword;
                 if (firstKeyword) setSelectedCategoryVariant(firstKeyword);
-                console.log("All category keyword executions finished.");
+
+                console.log('All category keyword executions finished.');
               }
             }
+          }
+
+          if (summary) {
+            setPipelineSummary(summary);
           }
 
           const fetchMarketplaceStages = async (arnOverride?: string | null) => {
@@ -1852,46 +2388,65 @@ const Dashboard = () => {
             }
           };
 
-          if (currentStatus === 'SUCCEEDED') {
-            // On success, ensure we fetch the latest stage data once more. In category mode use first execution ARN so we load the correct variant (effectiveStageArn not yet updated).
+          const businessStatus = getBusinessPipelineStatus(awsStatus, summary);
+          const executionTerminal = isTerminalAwsStatus(awsStatus) || categoryAllFinished;
+
+          if (awsStatus === 'ABORTED' || businessStatus === 'ABORTED') {
+            setStatusMessage('ABORTED');
+            setPipelineStatus('FAILED');
+            setIsLoading(false);
+            clearInterval(pollingInterval);
+            setPollingIntervalRef(null);
+          } else if (
+            (awsStatus === 'FAILED' || awsStatus === 'TIMED_OUT') &&
+            businessStatus !== 'SUCCEEDED' &&
+            businessStatus !== 'PARTIALLY_SUCCEEDED'
+          ) {
+            const failMsg = summary?.message || `Pipeline execution failed: ${awsStatus}`;
+            setStatusMessage(failMsg);
+            setError(failMsg);
+            setPipelineStatus('FAILED');
+            setIsLoading(false);
+            clearInterval(pollingInterval);
+            setPollingIntervalRef(null);
+          } else if (executionTerminal && businessStatus === 'FAILED') {
+            const failMsg = summary?.message || 'Pipeline execution failed during processing.';
+            setStatusMessage(failMsg);
+            setError(failMsg);
+            setPipelineStatus('FAILED');
+            setIsLoading(false);
+            clearInterval(pollingInterval);
+            setPollingIntervalRef(null);
+          } else if (
+            executionTerminal &&
+            (businessStatus === 'SUCCEEDED' || businessStatus === 'PARTIALLY_SUCCEEDED')
+          ) {
+            // Business success or partial success — do not rely on AWS status alone
             const arnForFetch = searchingMode === 'CATEGORY BASED' ? (categoryFirstArnWhenFinished ?? undefined) : undefined;
             await fetchMarketplaceStages(arnForFetch);
 
-            setStatusMessage(searchingMode === 'CATEGORY BASED' ? 'Pipeline completed! View stage data below.' : 'Pipeline completed successfully! Fetching final results...');
+            setStatusMessage(
+              summary?.message ||
+                (searchingMode === 'CATEGORY BASED'
+                  ? 'Pipeline completed! View stage data below.'
+                  : 'Pipeline completed successfully! Fetching final results...')
+            );
             clearInterval(pollingInterval);
             setPollingIntervalRef(null);
             setPipelineStatus('COMPLETED');
             setIsPreliminary(false);
 
-            // Category mode: do not fetch/show ranked data; show only Keyword Planner, Google Trends, Amazon, Alibaba stage data (same as manual mode)
             if (searchingMode !== 'CATEGORY BASED') {
               const finalParams = getApiParams();
               const finalProducts = await fetchProducts(finalParams);
               setProducts(finalProducts);
             }
             setIsLoading(false);
-          } else if (currentStatus === 'ABORTED') {
-            setStatusMessage('ABORTED');
-            setPipelineStatus('FAILED');
-            setIsLoading(false);
-            clearInterval(pollingInterval);
-            setPollingIntervalRef(null);
-          } else if (currentStatus === 'FAILED' || currentStatus === 'TIMED_OUT') {
-            setStatusMessage(`Pipeline failed: ${currentStatus}`);
-            setError(`Pipeline execution failed: ${currentStatus}`);
-            setPipelineStatus('FAILED');
-            setIsLoading(false);
-            clearInterval(pollingInterval);
-            setPollingIntervalRef(null);
           } else {
             // Still running
-            setStatusMessage(currentStatus);
+            setStatusMessage(statusData.status || 'RUNNING');
 
-            // While running, keep refreshing intermediate stage data
             await fetchMarketplaceStages();
-
-            // Preliminary consolidated fetch disabled — stage tables (KWP, Trends, Amazon, Alibaba)
-            // appear progressively as each Lambda clean step completes (see fetchMarketplaceStages above).
           }
 
         } catch (e) {
@@ -2817,6 +3372,9 @@ const Dashboard = () => {
         {/* Products Results Table */}
         {(products.length > 0 || error || isLoading || pipelineStatus !== 'IDLE' || hasPerformedSearch) && (
           <div className="mt-8">
+            {/* Pipeline Execution Hub — manual / auto modes only (category mode shows hub below tracker per variant) */}
+            {searchingMode !== 'CATEGORY BASED' && renderPipelineExecutionHub()}
+
             {/* Preliminary results banner - shown while pipeline is still running and we have partial data */}
             {isPreliminary && pipelineStatus === 'POLLING' && products.length > 0 && (
               <div className="mb-4 px-4 py-3 bg-yellow-500/20 border border-yellow-400/50 rounded flex items-center gap-3">
@@ -2837,10 +3395,32 @@ const Dashboard = () => {
                     <p className="text-xs text-gray-400 mt-1">Merged from all pipeline stages · Scored &amp; ranked in-browser</p>
                   </div>
                   <div className="flex items-center gap-3">
-                    <span className="inline-flex items-center gap-2 px-3 py-1 bg-green-500/20 border border-green-400/40 rounded text-green-300 text-xs font-bold">
-                      <span className="w-2 h-2 rounded-full bg-green-400" />
-                      SUCCEEDED
-                    </span>
+                    {(() => {
+                      const overallStatus = getOverallPipelineStatus();
+                      let badgeClass = 'bg-white/5 text-gray-400 border-white/10';
+                      let dotClass = 'bg-gray-400';
+
+                      if (overallStatus === 'SUCCEEDED') {
+                        badgeClass = 'bg-green-500/20 border-green-400/40 text-green-300';
+                        dotClass = 'bg-green-400';
+                      } else if (overallStatus === 'PARTIALLY_SUCCEEDED') {
+                        badgeClass = 'bg-orange-500/20 border-orange-400/40 text-orange-300';
+                        dotClass = 'bg-orange-400';
+                      } else if (overallStatus === 'FAILED') {
+                        badgeClass = 'bg-red-500/20 border-red-400/40 text-red-300';
+                        dotClass = 'bg-red-400';
+                      } else if (overallStatus === 'RUNNING') {
+                        badgeClass = 'bg-blue-500/20 border-blue-400/40 text-blue-300 animate-pulse';
+                        dotClass = 'bg-blue-400';
+                      }
+
+                      return (
+                        <span className={`inline-flex items-center gap-2 px-3 py-1 border rounded text-xs font-bold uppercase tracking-wide ${badgeClass}`}>
+                          <span className={`w-2 h-2 rounded-full ${dotClass}`} />
+                          {overallStatus}
+                        </span>
+                      );
+                    })()}
                     <span className="text-sm text-gray-300">
                       {consolidatedResults.length} rows
                     </span>
@@ -3073,11 +3653,14 @@ const Dashboard = () => {
                           className="px-3 py-1 text-xs bg-[#32402F] text-white border border-white/40 rounded focus:outline-none focus:border-[#C0FE72]"
                         >
                           <option value="ALL">Select a variant</option>
-                          {categoryExecutions.map((exec) => (
-                            <option key={exec.keyword} value={exec.keyword}>
-                              {exec.keyword}
-                            </option>
-                          ))}
+                          {categoryExecutions.map((exec) => {
+                            const health = getCategoryExecutionPipelineStatus(exec);
+                            return (
+                              <option key={exec.keyword} value={exec.keyword}>
+                                {exec.keyword} ({health})
+                              </option>
+                            );
+                          })}
                         </select>
                       </div>
                     </div>
@@ -3086,42 +3669,53 @@ const Dashboard = () => {
                         <thead>
                           <tr className="border-b border-white/30 text-gray-300">
                             <th className="pb-3 pr-4 font-semibold uppercase tracking-wider">Target Keyword</th>
-                            <th className="pb-3 px-4 font-semibold uppercase tracking-wider">Execution Status</th>
+                            <th className="pb-3 px-4 font-semibold uppercase tracking-wider">Pipeline Status</th>
+                            <th className="pb-3 px-4 font-semibold uppercase tracking-wider min-w-[280px]">Message</th>
                             <th className="pb-3 pl-4 font-semibold uppercase tracking-wider">Run ID / ARN</th>
                           </tr>
                         </thead>
                         <tbody>
-                          {categoryExecutions.map((exec, idx) => (
+                          {categoryExecutions.map((exec, idx) => {
+                            const pipelineHealth = getCategoryExecutionPipelineStatus(exec);
+                            const badge = getPipelineStatusBadgeClasses(pipelineHealth);
+                            const message =
+                              exec.pipeline_summary?.message ||
+                              (pipelineHealth === 'RUNNING'
+                                ? 'Pipeline in progress...'
+                                : pipelineHealth === 'PENDING'
+                                  ? 'Waiting to start...'
+                                  : '—');
+
+                            return (
                             <tr key={idx} className="border-b border-white/10 hover:bg-white/5 transition-colors">
                               <td className="py-4 pr-4 font-medium text-white">{exec.keyword}</td>
                               <td className="py-4 px-4">
-                                <span className={`inline-flex items-center px-3 py-1 rounded-full text-xs font-bold tracking-tight shadow-sm ${exec.status === 'SUCCEEDED' ? 'bg-green-500/20 text-green-400 border border-green-500/30' :
-                                  exec.status === 'FAILED' ? 'bg-red-500/20 text-red-400 border border-red-500/30' :
-                                    exec.status === 'RUNNING' ? 'bg-blue-500/20 text-blue-400 border border-blue-500/30 animate-pulse' :
-                                      'bg-gray-500/20 text-gray-400 border border-gray-500/30'
-                                  }`}>
-                                  <span className={`w-2 h-2 rounded-full mr-2 ${exec.status === 'SUCCEEDED' ? 'bg-green-400' :
-                                    exec.status === 'FAILED' ? 'bg-red-400' :
-                                      exec.status === 'RUNNING' ? 'bg-blue-400' :
-                                        'bg-gray-400'
-                                    }`}></span>
-                                  {exec.status || 'INITIALIZING'}
+                                <span className={`inline-flex items-center px-3 py-1 rounded-full text-xs font-bold tracking-tight shadow-sm ${badge.badge}`}>
+                                  <span className={`w-2 h-2 rounded-full mr-2 ${badge.dot} ${badge.pulse ? 'animate-pulse' : ''}`}></span>
+                                  {pipelineHealth}
                                 </span>
+                              </td>
+                              <td className="py-4 px-4 text-xs text-gray-300 min-w-[280px] max-w-xl">
+                                <span className="block break-words whitespace-normal leading-relaxed">{message}</span>
                               </td>
                               <td className="py-4 pl-4 font-mono text-[10px] text-gray-500 break-all max-w-xs">{exec.run_id || exec.execution_arn}</td>
                             </tr>
-                          ))}
+                            );
+                          })}
                         </tbody>
                       </table>
                     </div>
                   </div>
                 )}
 
-                {/* Stage results - below Category Pipeline Tracker; per selected variant only (no merge) */}
+                {/* Pipeline Execution Hub for selected category variant */}
                 {searchingMode === 'CATEGORY BASED' && categoryExecutions.length > 0 && selectedCategoryVariant !== 'ALL' && (
-                  <div className="mb-6 p-3 bg-[#32402F] rounded border border-[#C0FE72]/20">
-                    <p className="text-sm text-gray-300">
-                      Showing data for variant: <strong className="text-[#C0FE72]">{selectedCategoryVariant}</strong>
+                  renderPipelineExecutionHub(selectedCategoryVariant)
+                )}
+                {searchingMode === 'CATEGORY BASED' && categoryExecutions.length > 0 && selectedCategoryVariant === 'ALL' && (
+                  <div className="mb-8 p-5 rounded-xl bg-white/[0.02] border border-white/10 text-center">
+                    <p className="text-sm text-gray-400">
+                      Select a variant from <strong className="text-[#C0FE72]">Variant View</strong> above to see pipeline execution status and stage details for that keyword.
                     </p>
                   </div>
                 )}

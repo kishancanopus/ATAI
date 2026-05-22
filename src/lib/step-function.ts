@@ -1,5 +1,10 @@
 
 import { SFNClient, StartExecutionCommand, DescribeExecutionCommand, StopExecutionCommand, GetExecutionHistoryCommand } from "@aws-sdk/client-sfn";
+import {
+    ExecutionStatusResponse,
+    normalizePipelineSummary,
+    PipelineSummary,
+} from "@/types/pipeline";
 import { S3Client, GetObjectCommand } from "@aws-sdk/client-s3";
 import { LambdaClient, InvokeCommand } from "@aws-sdk/client-lambda";
 import { parquetReadObjects } from "hyparquet";
@@ -307,14 +312,39 @@ export async function startPipelineExecution(keyword: string, filters: PipelineF
     };
 }
 
-export async function getExecutionStatus(executionArn: string) {
+function extractPipelineSummaryFromOutput(output: string | undefined): PipelineSummary | null {
+    if (!output) return null;
+
+    try {
+        let parsed: unknown = JSON.parse(output);
+        if (typeof parsed === 'string') {
+            parsed = JSON.parse(parsed);
+        }
+        if (!parsed || typeof parsed !== 'object') return null;
+
+        const root = parsed as Record<string, unknown>;
+
+        if (root.pipeline_summary) {
+            return normalizePipelineSummary(root.pipeline_summary);
+        }
+
+        // Resolver payload at root (defensive)
+        return normalizePipelineSummary(root);
+    } catch (e) {
+        console.error("Error parsing pipeline execution output:", e);
+        return null;
+    }
+}
+
+export async function getExecutionStatus(executionArn: string): Promise<ExecutionStatusResponse> {
     if (executionArn.startsWith('category_search:')) {
         // For category search, we return RUNNING. The frontend will manage the completion
         // based on the individual child executions.
         return {
             status: 'RUNNING',
             startDate: new Date(),
-            stopDate: undefined
+            stopDate: undefined,
+            pipeline_summary: null,
         };
     }
 
@@ -323,13 +353,16 @@ export async function getExecutionStatus(executionArn: string) {
     });
 
     const response = await sfnClient.send(command);
+    const pipeline_summary = extractPipelineSummaryFromOutput(response.output);
+
     return {
-        status: response.status, // RUNNING, SUCCEEDED, FAILED, TIMED_OUT, ABORTED
+        status: response.status ?? 'UNKNOWN', // RUNNING, SUCCEEDED, FAILED, TIMED_OUT, ABORTED
         startDate: response.startDate,
         stopDate: response.stopDate,
         output: response.output,
+        pipeline_summary,
         error: response.error,
-        cause: response.cause
+        cause: response.cause,
     };
 }
 
