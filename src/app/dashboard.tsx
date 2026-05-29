@@ -16,6 +16,7 @@ import {
   aggregatePipelineStatuses,
   hasPipelineStageData,
   needsBusinessSummaryRefresh,
+  filterConsolidatedByGoogleTrendScore,
 } from '@/types/pipeline';
 
 // Countries with geo codes - moved outside component since it's static
@@ -310,6 +311,12 @@ const Dashboard = () => {
   const [isPreliminary, setIsPreliminary] = useState(false);
   const [hasPerformedSearch, setHasPerformedSearch] = useState(false);
   const [consolidatedResults, setConsolidatedResults] = useState<any[]>([]);
+
+  /** Rows shown in consolidated table — always re-filtered when GT score slider changes */
+  const displayedConsolidatedResults = useMemo(() => {
+    const filtered = filterConsolidatedByGoogleTrendScore(consolidatedResults, googleTrendScore);
+    return filtered.map((row, i) => ({ ...row, rank: i + 1 }));
+  }, [consolidatedResults, googleTrendScore]);
   const [categoryExecutions, setCategoryExecutions] = useState<CategoryExecution[]>([]);
   const categoryExecutionsRef = useRef(categoryExecutions);
   useEffect(() => {
@@ -965,13 +972,13 @@ const Dashboard = () => {
 
   // Export current consolidated results as a single Excel file.
   const handleExportCsv = useCallback(async () => {
-    if (pipelineStatus !== 'COMPLETED' || consolidatedResults.length === 0) return;
+    if (pipelineStatus !== 'COMPLETED' || displayedConsolidatedResults.length === 0) return;
 
     try {
       const wb = XLSX.utils.book_new();
 
       // Export only the consolidated results shown in the main table
-      XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(consolidatedResults), 'Consolidated Results');
+      XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(displayedConsolidatedResults), 'Consolidated Results');
 
       const now = new Date();
       const timestamp = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}_${String(now.getHours()).padStart(2, '0')}-${String(now.getMinutes()).padStart(2, '0')}`;
@@ -994,7 +1001,7 @@ const Dashboard = () => {
     } catch (err) {
       console.error('Error exporting Excel:', err);
     }
-  }, [pipelineStatus, consolidatedResults, searchingMode, productCategory, keywordSearch]);
+  }, [pipelineStatus, displayedConsolidatedResults, searchingMode, productCategory, keywordSearch]);
 
   // Info button component with tooltip
   const InfoButton = ({ message }: { message: string }) => {
@@ -1408,11 +1415,19 @@ const Dashboard = () => {
       const competitionIndex = kwpMatch?.competition_index ?? row.competition_index ?? '-';
       const trendDirection = kwpMatch?.trend_direction ?? row.trend_direction ?? '-';
 
-      // ── Google Trends fields
-      const trendPeak = Number(trendMatch?.gt_interest_peak ?? 0);
-      const trendAvg = Number(trendMatch?.gt_interest_avg ?? 0);
+      // ── Google Trends fields (preserve 0 when a trends row matched; null = no GT data)
+      const hasTrendMatch = trendMatch != null;
+      const trendPeak = hasTrendMatch
+        ? Number(trendMatch?.gt_interest_peak ?? trendMatch?.interest_peak ?? 0)
+        : null;
+      const trendAvg = hasTrendMatch
+        ? Number(trendMatch?.gt_interest_avg ?? trendMatch?.interest_avg ?? 0)
+        : null;
       const gtInterestTrend = trendMatch?.gt_interest_trend ?? '-';
-      const gtInterestChangePct = trendMatch?.gt_interest_change_pct ?? null;
+      const gtInterestChangePct =
+        trendMatch && trendMatch.gt_interest_change_pct != null
+          ? Number(trendMatch.gt_interest_change_pct)
+          : null;
 
       // ── Amazon fields (from fuzzy-matched Amazon row)
       const amazonTitle = amzMatch?.title ?? '-';
@@ -1458,8 +1473,8 @@ const Dashboard = () => {
         competition_index: competitionIndex,
         kwp_trend_direction: trendDirection,
         // Google Trends
-        trend_peak: trendPeak || null,
-        trend_avg: trendAvg ? Number(trendAvg.toFixed(1)) : null,
+        trend_peak: trendPeak,
+        trend_avg: trendAvg !== null ? Number(trendAvg.toFixed(1)) : null,
         gt_interest_trend: gtInterestTrend,
         gt_interest_change_pct: gtInterestChangePct,
         // Amazon
@@ -1489,16 +1504,17 @@ const Dashboard = () => {
       };
     });
 
-    // Rank by final_score descending
-    const ranked = [...scored]
-      .sort((a, b) => b.final_score - a.final_score)
-      .map((row, i) => ({ rank: i + 1, ...row }));
+    // Rank by final_score descending; drop rows below GT threshold when configured
+    const ranked = filterConsolidatedByGoogleTrendScore(
+      [...scored].sort((a, b) => b.final_score - a.final_score),
+      googleTrendScore
+    ).map((row, i) => ({ rank: i + 1, ...row }));
 
     setConsolidatedResults(ranked);
-  }, [amazonResults, alibabaResults, keywordPlannerResults, trendsResults]);
+  }, [amazonResults, alibabaResults, keywordPlannerResults, trendsResults, googleTrendScore]);
 
   // Apply UI filters to the consolidated list dynamically.
-  // No longer applying in-browser filters, rendering consolidatedResults directly.
+  // Consolidated table uses displayedConsolidatedResults (GT threshold applied at build + render).
 
   // Trigger consolidation once the pipeline succeeds, or for intermediate results during POLLING
   useEffect(() => {
@@ -3555,13 +3571,18 @@ const Dashboard = () => {
             )}
 
             {/* ── CONSOLIDATED RESULTS TABLE – shown as soon as pipeline starts delivering data ── */}
-            {(pipelineStatus === 'COMPLETED' || pipelineStatus === 'POLLING') && consolidatedResults.length > 0 && (
+            {(pipelineStatus === 'COMPLETED' || pipelineStatus === 'POLLING') && displayedConsolidatedResults.length > 0 && (
               <div className="mt-6 mb-10">
                 {/* Header */}
                 <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 mb-5 border-b border-[#C0FE72]/30 pb-4">
                   <div>
                     <h2 className="text-2xl font-bold text-[#C0FE72] tracking-wider">CONSOLIDATED RESULTS</h2>
-                    <p className="text-xs text-gray-400 mt-1">Merged from all pipeline stages · Scored &amp; ranked in-browser</p>
+                    <p className="text-xs text-gray-400 mt-1">
+                      Merged from all pipeline stages · Scored &amp; ranked in-browser
+                      {googleTrendScore > 0 && (
+                        <> · Only keywords with <strong className="text-gray-300">GT Avg ≥ {googleTrendScore}</strong></>
+                      )}
+                    </p>
                   </div>
                   <div className="flex items-center gap-3">
                     {(() => {
@@ -3591,7 +3612,7 @@ const Dashboard = () => {
                       );
                     })()}
                     <span className="text-sm text-gray-300">
-                      {consolidatedResults.length} rows
+                      {displayedConsolidatedResults.length} rows
                     </span>
                   </div>
                 </div>
@@ -3653,11 +3674,14 @@ const Dashboard = () => {
                       </tr>
                     </thead>
                     <tbody>
-                      {consolidatedResults.map((row, idx) => {
+                      {displayedConsolidatedResults.map((row, idx) => {
                         const scoreColor = (s: number) =>
                           s >= 70 ? 'text-green-400' : s >= 40 ? 'text-yellow-300' : 'text-red-400';
                         const fmtNum = (v: any, prefix = '', suffix = '', decimals = 0) =>
                           v !== null && v !== undefined && v !== '-' && Number(v) !== 0
+                            ? `${prefix}${Number(v).toFixed(decimals)}${suffix}` : '-';
+                        const fmtGtNum = (v: any, prefix = '', suffix = '', decimals = 0) =>
+                          v !== null && v !== undefined && v !== '-' && Number.isFinite(Number(v))
                             ? `${prefix}${Number(v).toFixed(decimals)}${suffix}` : '-';
                         const str = (v: any) => (v && v !== '-' ? String(v) : '-');
                         const isSelected = selectedRowIndex === idx;
@@ -3678,8 +3702,8 @@ const Dashboard = () => {
                             <td className="px-3 py-2 text-gray-100 whitespace-nowrap">{fmtNum(row.cpc_usd, '$', '', 2)}</td>
                             <td className="px-3 py-2 text-gray-300 whitespace-nowrap capitalize border-r border-white/10">{str(row.kwp_trend_direction)}</td>
                             {/* Google Trends */}
-                            <td className="px-3 py-2 text-gray-100 whitespace-nowrap">{fmtNum(row.trend_peak)}</td>
-                            <td className="px-3 py-2 text-gray-100 whitespace-nowrap">{fmtNum(row.trend_avg, '', '', 1)}</td>
+                            <td className="px-3 py-2 text-gray-100 whitespace-nowrap">{fmtGtNum(row.trend_peak)}</td>
+                            <td className="px-3 py-2 text-gray-100 whitespace-nowrap">{fmtGtNum(row.trend_avg, '', '', 1)}</td>
                             <td className="px-3 py-2 text-gray-100 whitespace-nowrap capitalize">{str(row.gt_interest_trend)}</td>
                             <td className="px-3 py-2 whitespace-nowrap border-r border-white/10">
                               {row.gt_interest_change_pct !== null && row.gt_interest_change_pct !== undefined
@@ -3767,6 +3791,25 @@ const Dashboard = () => {
                   <div ref={stickyScrollContentRef} style={{ height: '1px' }} />
                 </div>
 
+              </div>
+            )}
+
+            {/* GT threshold removed every row from consolidated view */}
+            {pipelineStatus === 'COMPLETED' &&
+              !isLoading &&
+              googleTrendScore > 0 &&
+              displayedConsolidatedResults.length === 0 &&
+              hasLoadedKeywordPlanner &&
+              (keywordPlannerResults?.length ?? 0) > 0 && (
+              <div className="mt-6 mb-10 p-6 bg-[#2a3627] rounded border border-orange-400/40 text-center">
+                <div className="text-4xl mb-3">📈</div>
+                <p className="text-lg font-bold text-orange-300 mb-2">
+                  No keywords met Google Trend score ≥ {googleTrendScore}
+                </p>
+                <p className="text-sm text-gray-400 max-w-lg mx-auto">
+                  Keyword Planner returned results, but none had a GT Avg at or above your threshold. Lower the{' '}
+                  <strong className="text-white">Google Trend Score</strong> slider (or set it to 0 to show all) and search again.
+                </p>
               </div>
             )}
 
@@ -3881,10 +3924,12 @@ const Dashboard = () => {
                 {searchingMode === 'CATEGORY BASED' && categoryExecutions.length > 0 && selectedVariantKey && (
                   renderPipelineExecutionHub(selectedVariantKey)
                 )}
-                {searchingMode === 'CATEGORY BASED' && categoryExecutions.length > 0 && selectedCategoryVariant === 'ALL' && (
+                {searchingMode === 'CATEGORY BASED' && categoryExecutions.length > 0 && !selectedVariantKey && (
                   <div className="mb-8 p-5 rounded-xl bg-white/[0.02] border border-white/10 text-center">
                     <p className="text-sm text-gray-400">
-                      Select a variant from <strong className="text-[#C0FE72]">Variant View</strong> above to see pipeline execution status and stage details for that keyword.
+                      Select a keyword from the <strong className="text-[#C0FE72]">Variant View</strong> dropdown above to view pipeline execution status and{' '}
+                      <strong className="text-[#C0FE72]">Keyword Planner</strong>, <strong className="text-[#C0FE72]">Google Trends</strong>,{' '}
+                      <strong className="text-[#C0FE72]">Amazon</strong>, and <strong className="text-[#C0FE72]">Alibaba</strong> stage data for that keyword only.
                     </p>
                   </div>
                 )}
@@ -3908,14 +3953,6 @@ const Dashboard = () => {
                       </p>
                     </div>
                   )}
-                {/* Category mode: prompt to select a keyword to view stage data */}
-                {searchingMode === 'CATEGORY BASED' && selectedCategoryVariant === 'ALL' && categoryExecutions.length > 0 && !keywordPlannerResults?.length && !trendsResults?.length && (
-                  <div className="mb-6 p-4 bg-[#2a3627] rounded border border-white/20 text-center">
-                    <p className="text-gray-300 text-sm">
-                      Select a keyword from the <strong className="text-[#C0FE72]">Variant View</strong> dropdown above to view <strong>Keyword Planner</strong>, <strong>Google Trends</strong>, <strong>Amazon</strong>, and <strong>Alibaba</strong> stage data for that keyword only.
-                    </p>
-                  </div>
-                )}
                 {/* Keyword Planner Stage Summary */}
                 {(() => {
                   if (
