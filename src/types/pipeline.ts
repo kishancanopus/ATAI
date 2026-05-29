@@ -204,6 +204,27 @@ export type PipelineDisplayStatus =
   | 'ABORTED'
   | string;
 
+/** True when a consolidated row satisfies the user-configured Google Trend Score minimum */
+export function meetsGoogleTrendScoreThreshold(
+  trendAvg: number | null | undefined,
+  minScore: number
+): boolean {
+  if (minScore <= 0) return true;
+  if (trendAvg === null || trendAvg === undefined) return false;
+  const n = Number(trendAvg);
+  if (!Number.isFinite(n)) return false;
+  return n >= minScore;
+}
+
+/** Exclude consolidated rows that lack GT data or fall below the configured minimum */
+export function filterConsolidatedByGoogleTrendScore<T extends { trend_avg?: number | null }>(
+  rows: T[],
+  minScore: number
+): T[] {
+  if (minScore <= 0) return rows;
+  return rows.filter((row) => meetsGoogleTrendScoreThreshold(row.trend_avg, minScore));
+}
+
 /** Tailwind classes for pipeline status badges */
 export function getPipelineStatusBadgeClasses(status: PipelineDisplayStatus): {
   badge: string;
