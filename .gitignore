@@ -42,6 +42,10 @@ next-env.d.ts
 
 src.zip
 
-/aws_functions
-/logs
-/data
+data   
+data/presets.json
+
+# Application logs (date-stamped & PM2 logs) - keep folder, ignore log files
+logs/*.log
+aws_functions
+.vscode

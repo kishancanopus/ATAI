@@ -1,6 +1,7 @@
 
 import { NextRequest, NextResponse } from "next/server";
 import { getExecutionStatus } from "@/lib/step-function";
+import { logger } from "@/lib/logger";
 
 export async function GET(request: NextRequest) {
     try {
@@ -15,11 +16,12 @@ export async function GET(request: NextRequest) {
         }
 
         const status = await getExecutionStatus(arn);
+        logger.debug(`Pipeline status check | ARN: ${arn} | Status: ${status.status || 'unknown'}`);
 
         return NextResponse.json(status);
 
     } catch (error: unknown) {
-        console.error("Pipeline Status Error:", error);
+        logger.error("Pipeline Status Error", error);
         return NextResponse.json(
             { error: (error as Error).message || "Failed to get status" },
             { status: 500 }

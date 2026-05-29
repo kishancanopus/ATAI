@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getAlibabaStageResults } from "@/lib/step-function";
+import { logger } from "@/lib/logger";
 
 export async function GET(request: NextRequest) {
     try {
@@ -7,22 +8,17 @@ export async function GET(request: NextRequest) {
         const arn = searchParams.get("arn");
 
         if (!arn) {
-            console.error("Alibaba stage API called without arn");
+            logger.warn("Alibaba stage API called without ARN");
             return NextResponse.json(
                 { error: "Execution ARN is required" },
                 { status: 400 }
             );
         }
 
-        console.log("Alibaba stage API called with arn:", arn);
         const stageResult = await getAlibabaStageResults(arn);
-        console.log("Alibaba stageResult:", {
-            available: stageResult.available,
-            hasMeta: !!stageResult.alibaba_clean,
-            rows: stageResult.results?.length ?? 0
-        });
 
         if (!stageResult.available) {
+            logger.debug(`Alibaba stage not ready yet | ARN: ${arn}`);
             return NextResponse.json({
                 success: false,
                 message: "Alibaba marketplace stage not completed yet",
@@ -34,6 +30,8 @@ export async function GET(request: NextRequest) {
             typeof value === "bigint" ? Number(value) : value
         ));
 
+        logger.info(`Alibaba stage results fetched | ARN: ${arn} | Rows: ${serialized.length}`);
+
         return NextResponse.json({
             success: true,
             available: true,
@@ -42,11 +40,10 @@ export async function GET(request: NextRequest) {
             results: serialized
         });
     } catch (error: unknown) {
-        console.error("Alibaba Marketplace Stage API Error:", error);
+        logger.error("Alibaba Marketplace Stage API Error", error);
         return NextResponse.json(
             { error: (error as Error).message || "Failed to fetch Alibaba marketplace stage results" },
             { status: 500 }
         );
     }
 }
-

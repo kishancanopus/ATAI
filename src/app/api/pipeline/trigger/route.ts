@@ -1,6 +1,7 @@
 
 import { NextRequest, NextResponse } from "next/server";
 import { startPipelineExecution } from "@/lib/step-function";
+import { logger } from "@/lib/logger";
 
 export async function POST(request: NextRequest) {
     try {
@@ -15,9 +16,12 @@ export async function POST(request: NextRequest) {
             );
         }
 
-        console.log(`Triggering pipeline for ${keyword ? `keyword: ${keyword}` : `category: ${category}`} with filters:`, filters, `mode: ${search_mode}`);
-        console.log(`Filters:`, filters);
+        logger.info(`Triggering pipeline for ${keyword ? `keyword: ${keyword}` : `category: ${category}`} | Mode: ${search_mode}`);
+        logger.debug(`Payload: ${JSON.stringify(body)}`);
+        
         const result = await startPipelineExecution(keyword, filters, search_mode);
+
+        logger.info(`Pipeline triggered successfully. ARN: ${result.executionArn}`);
 
         return NextResponse.json({
             execution_details: result.execution_details,
@@ -27,10 +31,10 @@ export async function POST(request: NextRequest) {
         });
 
     } catch (error: unknown) {
-        console.error("Pipeline Trigger Error:", error);
+        logger.error("Pipeline Trigger Error", error);
         return NextResponse.json(
             { error: (error as Error).message || "Failed to start pipeline" },
             { status: 500 }
         );
     }
-}
+}

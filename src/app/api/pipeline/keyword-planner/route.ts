@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getKeywordPlannerStageResults } from "@/lib/step-function";
+import { logger } from "@/lib/logger";
 
 export async function GET(request: NextRequest) {
     try {
@@ -16,6 +17,7 @@ export async function GET(request: NextRequest) {
         const stageResult = await getKeywordPlannerStageResults(arn);
 
         if (!stageResult.available) {
+            logger.debug(`KWP stage not ready yet | ARN: ${arn}`);
             return NextResponse.json({
                 success: false,
                 message: "Keyword Planner stage not completed yet",
@@ -28,6 +30,8 @@ export async function GET(request: NextRequest) {
             typeof value === "bigint" ? Number(value) : value
         ));
 
+        logger.info(`KWP stage results fetched | ARN: ${arn} | Rows: ${serialized.length}`);
+
         return NextResponse.json({
             success: true,
             available: true,
@@ -36,11 +40,10 @@ export async function GET(request: NextRequest) {
             results: serialized
         });
     } catch (error: unknown) {
-        console.error("Keyword Planner Stage API Error:", error);
+        logger.error("Keyword Planner Stage API Error", error);
         return NextResponse.json(
             { error: (error as Error).message || "Failed to fetch Keyword Planner stage results" },
             { status: 500 }
         );
     }
 }
-
