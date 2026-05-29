@@ -1446,7 +1446,7 @@ const Dashboard = () => {
 
       // ── Scores (0–100)
       const demandScore = maxSV > 0 ? Math.round((avgMonthlySearches / maxSV) * 100) : 0;
-      const trendScore = maxTA > 0 ? Math.round((trendAvg / maxTA) * 100) : 0;
+      const trendScore = maxTA > 0 ? Math.round(((trendAvg ?? 0) / maxTA) * 100) : 0;
       // Lower Amazon reviews = less competition (easier market entry)
       const competitionScore = maxReviews > 0 ? Math.round((1 - Math.min(reviews / maxReviews, 1)) * 100) : 100;
       const priceScore = maxPrice > 0 && amazonPrice > 0 ? Math.round(Math.min((amazonPrice / maxPrice) * 100, 100)) : 0;
