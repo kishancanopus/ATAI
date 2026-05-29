@@ -186,4 +186,4 @@ These endpoints orchestrate the AWS Step Functions pipeline used to refresh rank
 - `src/app/api/trends/related-queries/route.ts` – Category/geo keyword discovery using SerpAPI + Google Trends.
 - `src/lib/s3.ts` – Shared S3 utilities for reading/writing Parquet and JSON config.
 - `src/lib/step-function.ts` – Step Functions integration, pipeline input builder, and stage-result helpers.
-- `src/lib/*.ts` – Supporting libraries for category seeds, and Google Trends keyword discovery.
+- `src/lib/*.ts` – Supporting libraries for category seeds and Google Trends keyword discovery.
