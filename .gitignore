@@ -41,3 +41,7 @@ yarn-error.log*
 next-env.d.ts
 
 src.zip
+
+/aws_functions
+/logs
+/data
