@@ -1,5 +1,12 @@
 
-import { SFNClient, StartExecutionCommand, DescribeExecutionCommand, StopExecutionCommand, GetExecutionHistoryCommand } from "@aws-sdk/client-sfn";
+import {
+    SFNClient,
+    StartExecutionCommand,
+    DescribeExecutionCommand,
+    StopExecutionCommand,
+    GetExecutionHistoryCommand,
+    ListExecutionsCommand,
+} from "@aws-sdk/client-sfn";
 import {
     ExecutionStatusResponse,
     normalizePipelineSummary,
@@ -246,6 +253,7 @@ export async function startPipelineExecution(keyword: string, filters: PipelineF
         const r = await buildInputAndStartExecution(keyword, filters, 'category_search');
         return {
             executionArn: r.executionArn,
+            executionName: r.executionName,
             status: 'SUCCEEDED' as const,
             message: 'Pipeline started successfully'
         };
@@ -334,6 +342,71 @@ function extractPipelineSummaryFromOutput(output: string | undefined): PipelineS
         console.error("Error parsing pipeline execution output:", e);
         return null;
     }
+}
+
+/** Same naming rule as buildInputAndStartExecution (category_search mode). */
+export function buildCategoryExecutionNamePrefix(keyword: string): string {
+    const safeKeyword = keyword.replace(/[^a-zA-Z0-9]/g, '_').slice(0, 60);
+    return `category_${safeKeyword}_`;
+}
+
+/**
+ * Find a Step Functions execution for a category child keyword when the UI lost the ARN
+ * (e.g. trigger succeeded in AWS but React state did not persist execution_arn).
+ */
+export async function findCategoryChildExecution(
+    keyword: string,
+    options?: { startedAfterMs?: number }
+): Promise<{ executionArn: string; executionName: string; status: string } | null> {
+    if (!STATE_MACHINE_ARN || !keyword.trim()) return null;
+
+    const prefix = buildCategoryExecutionNamePrefix(keyword);
+    const startedAfter = options?.startedAfterMs ?? Date.now() - 60 * 60 * 1000;
+
+    let best: {
+        executionArn: string;
+        executionName: string;
+        status: string;
+        startMs: number;
+    } | null = null;
+
+    const statusFilters = ['RUNNING', 'SUCCEEDED', 'FAILED', 'TIMED_OUT', 'ABORTED'] as const;
+
+    for (const statusFilter of statusFilters) {
+        const response = await sfnClient.send(
+            new ListExecutionsCommand({
+                stateMachineArn: STATE_MACHINE_ARN,
+                statusFilter,
+                maxResults: 100,
+            })
+        );
+
+        for (const exec of response.executions ?? []) {
+            const name = exec.name ?? '';
+            if (!name.startsWith(prefix)) continue;
+            const startMs = exec.startDate?.getTime() ?? 0;
+            if (startMs < startedAfter) continue;
+            if (!best || startMs > best.startMs) {
+                best = {
+                    executionArn: exec.executionArn!,
+                    executionName: name,
+                    status: exec.status ?? statusFilter,
+                    startMs,
+                };
+            }
+        }
+
+        if (best && statusFilter === 'RUNNING') {
+            break;
+        }
+    }
+
+    if (!best) return null;
+    return {
+        executionArn: best.executionArn,
+        executionName: best.executionName,
+        status: best.status,
+    };
 }
 
 export async function getExecutionStatus(executionArn: string): Promise<ExecutionStatusResponse> {
