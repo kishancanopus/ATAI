@@ -27,6 +27,7 @@ export async function POST(request: NextRequest) {
             execution_details: result.execution_details,
             success: !!result.status,
             executionArn: result.executionArn,
+            executionName: (result as { executionName?: string }).executionName,
             message: result.message
         });
 

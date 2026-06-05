@@ -130,6 +130,37 @@ export function hasPipelineStageData(summary: PipelineSummary | null | undefined
   return Object.keys(summary.stages).length > 0;
 }
 
+/** True while a child occupies a concurrent trigger slot (batch limit) */
+export function isCategoryExecutionInFlight(exec: CategoryExecution): boolean {
+  if (exec.status === 'PENDING' || exec.status === 'FAILED' || exec.status === 'ABORTED') {
+    return false;
+  }
+  if (isTerminalAwsStatus(exec.status)) return false;
+  // Resolver summary present — done for slot counting even if AWS status string is stale
+  if (exec.pipeline_summary?.pipeline_status) return false;
+  return exec.status === 'RUNNING' || exec.status === 'STARTING';
+}
+
+/** True when no further Step Function polling is needed for this child */
+export function isCategoryExecutionSettled(exec: CategoryExecution): boolean {
+  if (exec.status === 'FAILED' || exec.status === 'ABORTED' || exec.status === 'TIMED_OUT') {
+    return true;
+  }
+  if (isTerminalAwsStatus(exec.status)) return true;
+  if (exec.pipeline_summary?.pipeline_status) return true;
+  return false;
+}
+
+export function countInFlightCategoryExecutions(executions: CategoryExecution[]): number {
+  return executions.filter(isCategoryExecutionInFlight).length;
+}
+
+/** Batch complete when every child is settled and none are still queued or in-flight */
+export function areAllCategoryExecutionsFinished(executions: CategoryExecution[]): boolean {
+  if (executions.length === 0) return false;
+  return executions.every((exec) => exec.status !== 'PENDING' && !isCategoryExecutionInFlight(exec));
+}
+
 /** True when we should keep polling DescribeExecution for business summary */
 export function needsBusinessSummaryRefresh(exec: CategoryExecution): boolean {
   if (!exec.execution_arn) return false;
