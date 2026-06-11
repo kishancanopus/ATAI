@@ -1,3 +1,8 @@
+import {
+  resolveStageMessage,
+  type StageMessageSource,
+} from '@/lib/pipelineMessages';
+
 export type StageKey = 'keyword_planner' | 'google_trends' | 'amazon' | 'alibaba';
 
 export type StageStatus = 'SUCCEEDED' | 'FAILED' | 'EMPTY' | 'SKIPPED';
@@ -11,6 +16,8 @@ export interface StageSummary {
   rows: number;
   /** Legacy field from some Lambdas before resolver normalization */
   rows_processed?: number;
+  /** Raw error from Lambda (formatted copy also in message) */
+  error?: string;
 }
 
 export interface PipelineSummary {
@@ -45,6 +52,30 @@ export function isTerminalAwsStatus(status: string | undefined | null): boolean 
   return !!status && TERMINAL_AWS_STATUSES.has(status);
 }
 
+function normalizeStages(
+  stages: Record<string, unknown>
+): PipelineSummary['stages'] {
+  const result: PipelineSummary['stages'] = {};
+
+  for (const [key, val] of Object.entries(stages)) {
+    if (!val || typeof val !== 'object') continue;
+    const s = val as Record<string, unknown>;
+    const status = String(s.status ?? 'SKIPPED');
+    const fallback = `${key.replace(/_/g, ' ')} ${status.toLowerCase()}`;
+
+    result[key] = {
+      stage: String(s.stage ?? key),
+      status,
+      message: resolveStageMessage(s as StageMessageSource, fallback),
+      rows: Number(s.rows ?? s.rows_processed ?? 0),
+      ...(s.rows_processed != null ? { rows_processed: Number(s.rows_processed) } : {}),
+      ...(typeof s.error === 'string' ? { error: s.error } : {}),
+    };
+  }
+
+  return result;
+}
+
 /** Normalize raw pipeline_summary from API / Step Function output */
 export function normalizePipelineSummary(raw: unknown): PipelineSummary | null {
   if (!raw || typeof raw !== 'object') return null;
@@ -53,13 +84,14 @@ export function normalizePipelineSummary(raw: unknown): PipelineSummary | null {
 
   if (typeof obj.pipeline_status === 'string' && obj.stages && typeof obj.stages === 'object') {
     const status = obj.pipeline_status as PipelineStatus;
+    const stages = normalizeStages(obj.stages as Record<string, unknown>);
     return {
       pipeline_status: status,
       message:
         typeof obj.message === 'string'
           ? obj.message
           : `Pipeline execution completed with status ${status}`,
-      stages: obj.stages as PipelineSummary['stages'],
+      stages,
       ...(typeof obj.generated_at === 'string' ? { generated_at: obj.generated_at } : {}),
     };
   }

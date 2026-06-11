@@ -4,6 +4,11 @@ import React, { useState, useEffect, useCallback, useMemo, useRef } from 'react'
 import * as XLSX from 'xlsx';
 import { fetchProducts, Product } from '@/lib/productsService';
 import { getAmazonRowAsin, matchAmazonForKwpKeyword } from '@/lib/amazonKwpMatch';
+import {
+  formatPipelineStageMessage,
+  getPipelineUserMessage,
+  resolveStageMessage,
+} from '@/lib/pipelineMessages';
 import { resolveResultsCap, resolveVariantLimitMax } from '@/lib/searchFilters';
 import {
   applyCategoryExecutionUpdates,
@@ -14,6 +19,7 @@ import {
   ExecutionStatusResponse,
   getBusinessPipelineStatus,
   getCategoryExecutionDisplayStatus,
+  getEffectivePipelineStatus,
   getCategoryExecutionPipelineStatus,
   getPipelineStatusBadgeClasses,
   isTerminalAwsStatus,
@@ -567,10 +573,18 @@ const Dashboard = () => {
         );
         if (exec) {
           if (activePipelineSummary?.pipeline_status) {
-            return activePipelineSummary.pipeline_status;
+            return getEffectivePipelineStatus(
+              activePipelineSummary.pipeline_status,
+              activePipelineSummary,
+              { amazonFilters, alibabaFilters }
+            );
           }
           if (exec.pipeline_summary?.pipeline_status) {
-            return exec.pipeline_summary.pipeline_status;
+            return getEffectivePipelineStatus(
+              exec.pipeline_summary.pipeline_status,
+              exec.pipeline_summary,
+              { amazonFilters, alibabaFilters }
+            );
           }
           if (isVariantFetching || needsBusinessSummaryRefresh(exec)) {
             return 'RUNNING';
@@ -603,8 +617,12 @@ const Dashboard = () => {
       }
     }
 
-    if (pipelineSummary && pipelineSummary.pipeline_status) {
-      return pipelineSummary.pipeline_status;
+    if (pipelineSummary?.pipeline_status) {
+      return getEffectivePipelineStatus(
+        pipelineSummary.pipeline_status,
+        pipelineSummary,
+        { amazonFilters, alibabaFilters }
+      );
     }
     if (pipelineStatus === 'POLLING' || pipelineStatus === 'STARTING') {
       return 'RUNNING';
@@ -637,10 +655,10 @@ const Dashboard = () => {
 
     // 1. Check if filters are disabled for this stage
     if (stageKey === 'amazon' && !amazonFilters) {
-      return { status: 'SKIPPED', message: 'Amazon stage disabled in filters', rows: null };
+      return { status: 'SKIPPED', message: 'Not enabled in search filters', rows: null };
     }
     if (stageKey === 'alibaba' && !alibabaFilters) {
-      return { status: 'SKIPPED', message: 'Alibaba stage disabled in filters', rows: null };
+      return { status: 'SKIPPED', message: 'Not enabled in search filters', rows: null };
     }
 
     const variantSummary =
@@ -695,9 +713,15 @@ const Dashboard = () => {
                 : stageKey === 'alibaba' && hasLoadedAlibaba
                   ? alibabaResults?.length
                   : null;
+        const defaultMsg =
+          stageObj.status === 'FAILED' || stageObj.status === 'EMPTY'
+            ? `${toTitleCase(stageKey.replace('_', ' '))} stage failed`
+            : stageObj.status === 'SKIPPED'
+              ? `${toTitleCase(stageKey.replace('_', ' '))} stage skipped`
+              : `${toTitleCase(stageKey.replace('_', ' '))} stage completed`;
         return {
           status: stageObj.status || 'SUCCEEDED',
-          message: stageObj.message || `${toTitleCase(stageKey.replace('_', ' '))} stage completed`,
+          message: resolveStageMessage(stageObj, defaultMsg),
           rows: resolveStageDisplayRows(stageKey, summaryRows, loadedRows ?? null),
         };
       }
@@ -837,6 +861,8 @@ const Dashboard = () => {
     rows: number | null,
     icon: React.ReactNode
   ) => {
+    const displayMessage = formatPipelineStageMessage(message, message);
+    const isErrorLike = status === 'FAILED' || status === 'EMPTY';
     let statusClass = 'bg-white/5 text-gray-500 border-white/5';
     let dotClass = 'bg-gray-500';
     let isPulse = false;
@@ -875,7 +901,16 @@ const Dashboard = () => {
               {status}
             </span>
           </div>
-          <p className="text-xs text-gray-400 line-clamp-2 leading-relaxed">{message}</p>
+          <p
+            className={`text-xs leading-relaxed ${
+              isErrorLike
+                ? 'text-red-300/95 max-h-28 overflow-y-auto whitespace-normal break-words pr-1'
+                : 'text-gray-400 line-clamp-3'
+            }`}
+            title={message !== displayMessage ? message : undefined}
+          >
+            {displayMessage}
+          </p>
         </div>
         {status !== 'PENDING' && status !== 'SKIPPED' && rows !== null && (
           <div className="mt-3 flex items-center justify-between border-t border-white/5 pt-2 text-[11px] text-gray-400">
@@ -965,19 +1000,39 @@ const Dashboard = () => {
             } else if (overallStatus === 'SUCCEEDED') {
               bannerBg = 'bg-green-500/5 border-green-500/20';
               textClass = 'text-green-300';
-              statusMessageText =
-                summary?.message || 'All stages completed successfully. Consolidated results generated.';
+              statusMessageText = summary
+                ? getPipelineUserMessage({
+                    pipelineStatus: summary.pipeline_status,
+                    stages: summary.stages,
+                    amazonFilters,
+                    alibabaFilters,
+                    displayStatus: overallStatus,
+                  })
+                : 'All stages completed successfully';
             } else if (overallStatus === 'PARTIALLY_SUCCEEDED') {
               bannerBg = 'bg-orange-500/5 border-orange-500/20';
               textClass = 'text-orange-300';
-              statusMessageText =
-                summary?.message ||
-                'Pipeline completed with partial success. Some optional stages were skipped or had warnings.';
+              statusMessageText = summary
+                ? getPipelineUserMessage({
+                    pipelineStatus: summary.pipeline_status,
+                    stages: summary.stages,
+                    amazonFilters,
+                    alibabaFilters,
+                    displayStatus: overallStatus,
+                  })
+                : 'Completed with some stages skipped or incomplete';
             } else if (overallStatus === 'FAILED') {
               bannerBg = 'bg-red-500/5 border-red-500/20';
               textClass = 'text-red-300';
-              statusMessageText =
-                summary?.message || statusMessage || 'Pipeline execution failed during processing.';
+              statusMessageText = summary
+                ? getPipelineUserMessage({
+                    pipelineStatus: summary.pipeline_status,
+                    stages: summary.stages,
+                    amazonFilters,
+                    alibabaFilters,
+                    displayStatus: overallStatus,
+                  })
+                : formatPipelineStageMessage(statusMessage, 'Pipeline execution failed');
             } else {
               statusMessageText = 'Pipeline is pending execution.';
             }
@@ -986,7 +1041,9 @@ const Dashboard = () => {
               <div
                 className={`p-4 border rounded-xl mb-6 flex flex-col sm:flex-row sm:items-center justify-between gap-3 ${bannerBg} transition-all relative z-10`}
               >
-                <span className={`text-sm font-semibold tracking-wide ${textClass}`}>{statusMessageText}</span>
+                <span className={`text-sm font-semibold tracking-wide break-words whitespace-normal leading-relaxed ${textClass}`}>
+                  {statusMessageText}
+                </span>
                 {summary?.generated_at && (
                   <span className="text-xs text-gray-500 whitespace-nowrap">
                     Completed:{' '}
@@ -1052,6 +1109,8 @@ const Dashboard = () => {
       statusMessage,
       getStageStatusAndMeta,
       renderStageCard,
+      amazonFilters,
+      alibabaFilters,
     ]
   );
 
@@ -4010,17 +4069,21 @@ const Dashboard = () => {
                               alibabaFilters,
                             });
                             const badge = getPipelineStatusBadgeClasses(pipelineHealth);
-                            const message =
-                              exec.pipeline_summary?.message ||
-                              (pipelineHealth === 'RUNNING' &&
-                              isTerminalAwsStatus(exec.status) &&
-                              !exec.pipeline_summary?.pipeline_status
+                            const message = exec.pipeline_summary
+                              ? getPipelineUserMessage({
+                                  pipelineStatus: exec.pipeline_summary.pipeline_status,
+                                  stages: exec.pipeline_summary.stages,
+                                  amazonFilters,
+                                  alibabaFilters,
+                                  displayStatus: pipelineHealth,
+                                })
+                              : pipelineHealth === 'RUNNING' && isTerminalAwsStatus(exec.status)
                                 ? 'Finalizing pipeline results...'
                                 : pipelineHealth === 'RUNNING'
                                   ? 'Pipeline in progress...'
                                   : pipelineHealth === 'PENDING'
                                     ? 'Waiting to start...'
-                                    : '—');
+                                    : '—';
 
                             return (
                             <tr key={idx} className="border-b border-white/10 hover:bg-white/5 transition-colors">
