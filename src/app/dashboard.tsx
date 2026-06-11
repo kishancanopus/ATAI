@@ -3,21 +3,28 @@
 import React, { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import * as XLSX from 'xlsx';
 import { fetchProducts, Product } from '@/lib/productsService';
-import { matchAmazonForKwpKeyword } from '@/lib/amazonKwpMatch';
+import { getAmazonRowAsin, matchAmazonForKwpKeyword } from '@/lib/amazonKwpMatch';
+import { resolveResultsCap, resolveVariantLimitMax } from '@/lib/searchFilters';
 import {
+  applyCategoryExecutionUpdates,
+  categoryKeywordKey,
   buildCategoryBatchSummary,
   CategoryExecution,
+  categoryExecutionFromStatusApi,
   ExecutionStatusResponse,
   getBusinessPipelineStatus,
+  getCategoryExecutionDisplayStatus,
   getCategoryExecutionPipelineStatus,
   getPipelineStatusBadgeClasses,
   isTerminalAwsStatus,
+  mergeCategoryExecutionRow,
   normalizePipelineSummary,
   PipelineSummary,
   aggregatePipelineStatuses,
   hasPipelineStageData,
   needsBusinessSummaryRefresh,
   filterConsolidatedByGoogleTrendScore,
+  resolveStageDisplayRows,
   areAllCategoryExecutionsFinished,
   countInFlightCategoryExecutions,
   isCategoryExecutionInFlight,
@@ -324,34 +331,57 @@ const Dashboard = () => {
   const [categoryExecutions, setCategoryExecutions] = useState<CategoryExecution[]>([]);
   const categoryExecutionsRef = useRef(categoryExecutions);
   const categoryBatchStartedAtRef = useRef(0);
-  useEffect(() => {
-    categoryExecutionsRef.current = categoryExecutions;
-  }, [categoryExecutions]);
 
-  const reconcileCategoryExecutionRow = useCallback(
-    async (exec: CategoryExecution): Promise<CategoryExecution> => {
-      if (!exec.keyword?.trim() || exec.execution_arn) return exec;
-      try {
-        const since = categoryBatchStartedAtRef.current || Date.now() - 60 * 60 * 1000;
-        const res = await fetch(
-          `/api/pipeline/reconcile?keyword=${encodeURIComponent(exec.keyword.trim())}&since=${since}`
-        );
-        if (!res.ok) return exec;
-        const data = await res.json();
-        if (!data.found || !data.executionArn) return exec;
-        return {
-          ...exec,
-          execution_arn: data.executionArn,
-          run_id: data.executionName || String(data.executionArn).split(':').pop() || '',
-          status: data.status || 'RUNNING',
-          started_at: exec.started_at ?? Date.now(),
-        };
-      } catch {
-        return exec;
-      }
+  const pollCategoryExecutionsFromAws = useCallback(
+    async (executions: CategoryExecution[]): Promise<CategoryExecution[]> => {
+      return Promise.all(
+        executions.map(async (exec) => {
+          if (isTerminalAwsStatus(exec.status) && !needsBusinessSummaryRefresh(exec)) {
+            return exec;
+          }
+
+          const now = Date.now();
+          if (
+            exec.started_at &&
+            now - exec.started_at > 5 * 60 * 1000 &&
+            (exec.status === 'RUNNING' || exec.status === 'STARTING')
+          ) {
+            return mergeCategoryExecutionRow(exec, {
+              keyword: exec.keyword,
+              status: 'TIMED_OUT',
+            });
+          }
+
+          // ARN is assigned only by /api/pipeline/trigger — skip until trigger returns it
+          if (!exec.execution_arn) return exec;
+
+          try {
+            const res = await fetch(
+              `/api/pipeline/status?arn=${encodeURIComponent(exec.execution_arn)}`
+            );
+            const data: ExecutionStatusResponse = await res.json();
+            return categoryExecutionFromStatusApi(exec, data);
+          } catch (e) {
+            console.error(`Error fetching status for child ${exec.keyword}:`, e);
+            return exec;
+          }
+        })
+      );
     },
     []
   );
+
+  /** Ref is source of truth during batching — avoids React setState(prev) losing concurrent ARN updates */
+  const setCategoryExecutionsMerged = useCallback(
+    (next: CategoryExecution[] | ((prev: CategoryExecution[]) => CategoryExecution[])) => {
+      const resolved =
+        typeof next === 'function' ? next(categoryExecutionsRef.current) : next;
+      categoryExecutionsRef.current = resolved;
+      setCategoryExecutions(resolved);
+    },
+    []
+  );
+
   // Category test mode: keywords from Google Trends only (no pipeline trigger)
   const [categoryKeywordsPreview, setCategoryKeywordsPreview] = useState<string[] | null>(null);
   // Remember the core search context used for the last executed run.
@@ -545,7 +575,7 @@ const Dashboard = () => {
           if (isVariantFetching || needsBusinessSummaryRefresh(exec)) {
             return 'RUNNING';
           }
-          return getCategoryExecutionPipelineStatus(exec);
+          return getCategoryExecutionDisplayStatus(exec, { amazonFilters, alibabaFilters });
         }
         return 'PENDING';
       } else {
@@ -559,7 +589,9 @@ const Dashboard = () => {
           return 'RUNNING';
         }
         const resolved = categoryExecutions
-          .map((e) => getCategoryExecutionPipelineStatus(e))
+          .map((e) =>
+            getCategoryExecutionDisplayStatus(e, { amazonFilters, alibabaFilters })
+          )
           .filter(
             (s): s is 'SUCCEEDED' | 'PARTIALLY_SUCCEEDED' | 'FAILED' =>
               s === 'SUCCEEDED' || s === 'PARTIALLY_SUCCEEDED' || s === 'FAILED'
@@ -593,6 +625,8 @@ const Dashboard = () => {
     isBatching,
     activePipelineSummary,
     isVariantFetching,
+    amazonFilters,
+    alibabaFilters,
   ]);
 
   const getStageStatusAndMeta = useCallback((stageKey: string) => {
@@ -645,10 +679,26 @@ const Dashboard = () => {
       }
 
       if (stageObj) {
+        const summaryRows =
+          stageObj.rows !== undefined
+            ? stageObj.rows
+            : stageObj.rows_processed !== undefined
+              ? stageObj.rows_processed
+              : null;
+        const loadedRows =
+          stageKey === 'keyword_planner' && hasLoadedKeywordPlanner
+            ? keywordPlannerResults?.length
+            : stageKey === 'google_trends' && hasLoadedTrends
+              ? trendsResults?.length
+              : stageKey === 'amazon' && hasLoadedAmazon
+                ? amazonResults?.length
+                : stageKey === 'alibaba' && hasLoadedAlibaba
+                  ? alibabaResults?.length
+                  : null;
         return {
           status: stageObj.status || 'SUCCEEDED',
           message: stageObj.message || `${toTitleCase(stageKey.replace('_', ' '))} stage completed`,
-          rows: stageObj.rows !== undefined ? stageObj.rows : (stageObj.rows_processed !== undefined ? stageObj.rows_processed : null)
+          rows: resolveStageDisplayRows(stageKey, summaryRows, loadedRows ?? null),
         };
       }
     }
@@ -1105,7 +1155,7 @@ const Dashboard = () => {
     setPipelineSummary(null);
     setStatusMessage('');
     setIsPreliminary(false);
-    setCategoryExecutions([]);
+    setCategoryExecutionsMerged([]);
     setKeywordPlannerResults(null);
     setKeywordPlannerMeta(null);
     setHasLoadedKeywordPlanner(false);
@@ -1200,7 +1250,7 @@ const Dashboard = () => {
     setStatusMessage('');
     setIsPreliminary(false);
     setHasPerformedSearch(false);
-    setCategoryExecutions([]);
+    setCategoryExecutionsMerged([]);
     setKeywordPlannerResults(null);
     setKeywordPlannerMeta(null);
     setHasLoadedKeywordPlanner(false);
@@ -1264,7 +1314,7 @@ const Dashboard = () => {
     setPipelineSummary(null);
     setStatusMessage('');
     setIsPreliminary(false);
-    setCategoryExecutions([]);
+    setCategoryExecutionsMerged([]);
     setHasPerformedSearch(false);
     setKeywordPlannerResults(null);
     setKeywordPlannerMeta(null);
@@ -1307,24 +1357,58 @@ const Dashboard = () => {
     if (seedRows.length === 0) return;
 
     // ── Scoped grouping ─────────────────────────────────────────────────────
-    // In category mode every child execution sets a shared `keyword` field on
-    // every Amazon/Alibaba row (= the execution root keyword, e.g. "portable mp3 player").
-    // KWP variant rows carry `root_keyword` pointing to the same root.
-    // We group marketplace rows by that root keyword so each KWP variant is matched
-    // ONLY against products from its own execution — preventing the old arr[0]
-    // fallback from bleeding a random cross-execution product into every unmatched row.
-    const groupByExecKw = (rows: any[]): Map<string, any[]> => {
+    // Bucket marketplace rows under execution root keywords so each KWP variant
+    // only matches products from its own child execution.
+    const kwpRootKeys = new Set(
+      kwpRows
+        .map((r) => (r.root_keyword ?? r.keyword ?? '').toString().toLowerCase().trim())
+        .filter(Boolean)
+    );
+
+    const groupMarketplaceByRoot = (rows: any[]): Map<string, any[]> => {
       const m = new Map<string, any[]>();
-      for (const r of rows) {
-        const key = (r.keyword ?? r.search_category ?? '').toString().toLowerCase().trim();
-        if (!key) continue;
+      const append = (key: string, row: any) => {
+        if (!key) return;
         if (!m.has(key)) m.set(key, []);
-        m.get(key)!.push(r);
+        const bucket = m.get(key)!;
+        if (!bucket.includes(row)) bucket.push(row);
+      };
+      for (const r of rows) {
+        const kw = (r.keyword ?? '').toString().toLowerCase().trim();
+        const root = (r.root_keyword ?? '').toString().toLowerCase().trim();
+        const searchCat = (r.search_category ?? '').toString().toLowerCase().trim();
+        append(kw, r);
+        append(root, r);
+        append(searchCat, r);
+        for (const rk of kwpRootKeys) {
+          if (kw === rk || (kw && rk && (kw.startsWith(`${rk} `) || rk.startsWith(`${kw} `)))) {
+            append(rk, r);
+          }
+        }
       }
       return m;
     };
-    const amzByExecKw = groupByExecKw(amzRows);
-    const aliByExecKw = groupByExecKw(aliRows);
+    const amzByExecKw = groupMarketplaceByRoot(amzRows);
+    const aliByExecKw = groupMarketplaceByRoot(aliRows);
+
+    const seedKey = (row: any) =>
+      `${(row.root_keyword ?? row.keyword ?? '').toString().toLowerCase().trim()}::${(row.keyword ?? row.sub_keyword ?? row.root_keyword ?? '').toString().toLowerCase().trim()}`;
+
+    const usedAsins = new Set<string>();
+    const amzMatchBySeed = new Map<string, any | null>();
+    const seedsByVolume = [...seedRows].sort(
+      (a, b) =>
+        Number(b.avg_monthly_searches ?? 0) - Number(a.avg_monthly_searches ?? 0)
+    );
+    for (const row of seedsByVolume) {
+      const kw = (row.keyword ?? row.sub_keyword ?? row.root_keyword ?? '').toString();
+      const rootKw = (row.root_keyword ?? row.keyword ?? '').toString().toLowerCase().trim();
+      const scopedAmz = amzByExecKw.get(rootKw) ?? [];
+      const amzMatch = matchAmazonForKwpKeyword(kw, amzRows, scopedAmz, usedAsins);
+      amzMatchBySeed.set(seedKey(row), amzMatch);
+      const asin = amzMatch ? getAmazonRowAsin(amzMatch) : null;
+      if (asin) usedAsins.add(asin);
+    }
 
     // ── Fuzzy join helper ─────────────────────────────────────────────────
     // Priority: 1) exact match  2) bidirectional substring  3) title-word overlap
@@ -1400,14 +1484,12 @@ const Dashboard = () => {
 
     seedRows.forEach((row) => {
       const kw = (row.keyword ?? row.sub_keyword ?? row.root_keyword ?? '').toString();
-      // root_keyword = the execution's trigger keyword; use it to scope marketplace lookups
       const rootKw = (row.root_keyword ?? row.keyword ?? '').toString().toLowerCase().trim();
-      const scopedAmz = amzByExecKw.get(rootKw) ?? [];
       const scopedAli = aliByExecKw.get(rootKw) ?? [];
 
       const kwpMatch = matchFuzzy(kwpRows, kw, ['keyword', 'sub_keyword', 'root_keyword']);
       const trendMatch = matchFuzzy(trendRows, kw, ['keyword']);
-      const amzMatch = matchAmazonForKwpKeyword(kw, amzRows, scopedAmz);
+      const amzMatch = amzMatchBySeed.get(seedKey(row)) ?? null;
       const aliMatch = matchFuzzy(aliRows, kw, ['keyword', 'search_category'], 'title', scopedAli);
 
       const sv = Number(kwpMatch?.avg_monthly_searches ?? row.avg_monthly_searches ?? 0);
@@ -1436,12 +1518,11 @@ const Dashboard = () => {
     const scored = seedRows.map((row) => {
       const kw = (row.keyword ?? row.sub_keyword ?? row.root_keyword ?? '').toString();
       const rootKw = (row.root_keyword ?? row.keyword ?? '').toString().toLowerCase().trim();
-      const scopedAmz = amzByExecKw.get(rootKw) ?? [];
       const scopedAli = aliByExecKw.get(rootKw) ?? [];
 
       const kwpMatch = matchFuzzy(kwpRows, kw, ['keyword', 'sub_keyword', 'root_keyword']);
       const trendMatch = matchFuzzy(trendRows, kw, ['keyword']);
-      const amzMatch = matchAmazonForKwpKeyword(kw, amzRows, scopedAmz);
+      const amzMatch = amzMatchBySeed.get(seedKey(row)) ?? null;
       const aliMatch = matchFuzzy(aliRows, kw, ['keyword', 'search_category'], 'title', scopedAli);
 
       // ── KWP fields (from KWP seed row itself or kwpMatch)
@@ -1636,12 +1717,14 @@ const Dashboard = () => {
           fetch(`/api/pipeline/stop?arn=${encodeURIComponent(exec.execution_arn)}`, { method: 'POST' }).catch(() => { });
         }
       });
-      setCategoryExecutions(prev => prev.map(exec => {
-        if (exec.status === 'PENDING' || exec.status === 'STARTING' || exec.status === 'RUNNING') {
-          return { ...exec, status: 'ABORTED' };
-        }
-        return exec;
-      }));
+      setCategoryExecutionsMerged((current) =>
+        current.map((exec) => {
+          if (exec.status === 'PENDING' || exec.status === 'STARTING' || exec.status === 'RUNNING') {
+            return { ...exec, status: 'ABORTED' };
+          }
+          return exec;
+        })
+      );
       setPipelineStatus('FAILED');
       setStatusMessage('ABORTED');
       setIsLoading(false);
@@ -1841,7 +1924,7 @@ const Dashboard = () => {
     setHasPerformedSearch(true);
     setSelectedCategoryVariant('ALL');
     setCategoryKeywordsPreview(null);
-    setCategoryExecutions([]);
+    setCategoryExecutionsMerged([]);
     setKeywordPlannerResults(null);
     setKeywordPlannerMeta(null);
     setHasLoadedKeywordPlanner(false);
@@ -1889,8 +1972,8 @@ const Dashboard = () => {
             location: searchLocation,
             category: searchCategory || "",
             trendPeriod: trendPeriod ? parseInt(trendPeriod) : undefined,
-            variantLimitMax: variantLimitMax ? parseInt(variantLimitMax) : undefined,
-            size: resultsCap ? parseInt(resultsCap) : undefined,
+            variantLimitMax: resolveVariantLimitMax(variantLimitMax),
+            size: resolveResultsCap(resultsCap),
             amazonFilters,
             alibabaFilters,
             blacklist: blacklistedWords.length > 0 ? blacklistedWords : undefined,
@@ -1921,7 +2004,7 @@ const Dashboard = () => {
             body: JSON.stringify({
               category: searchCategory,
               geo: searchLocation,
-              limit: variantLimitMax ? parseInt(variantLimitMax) : 50,
+              limit: resolveVariantLimitMax(variantLimitMax),
               search_volume_min: kwpMinSearches ? parseInt(kwpMinSearches) : undefined,
               search_volume_max: kwpMaxSearches ? parseInt(kwpMaxSearches) : undefined,
               blacklist: blacklistedWords.length > 0 ? blacklistedWords : []
@@ -1946,7 +2029,7 @@ const Dashboard = () => {
             status: 'PENDING',
             started_at: null
           }));
-          setCategoryExecutions(initialExecutions);
+          setCategoryExecutionsMerged(initialExecutions);
           setCategoryKeywordsPreview(generatedKeywords);
           setExecutionArn(`category_search:frontend_managed:${Date.now()}`); // Mock ARN to trigger polling loop later
           setPipelineStatus('POLLING'); // Start polling early so we can track statuses during batching
@@ -1955,108 +2038,33 @@ const Dashboard = () => {
 
           // Fire and forget the sequential triggering logic
           (async () => {
-            const sleep = (ms: number) => new Promise(res => setTimeout(res, ms));
+            const sleep = (ms: number) => new Promise((res) => setTimeout(res, ms));
+            const TRIGGER_INTERVAL_MS = 5000;
+            const MAX_CONCURRENT = 5;
             let lastTriggerTime = 0;
 
             const updateCategoryExecByKeyword = (
               keyword: string,
               patch: Partial<CategoryExecution>
             ) => {
-              setCategoryExecutions((prev) => {
-                const next = prev.map((exec) =>
-                  (exec.keyword ?? '').trim() === keyword.trim() ? { ...exec, ...patch } : exec
-                );
-                categoryExecutionsRef.current = next;
-                return next;
-              });
+              const key = categoryKeywordKey(keyword);
+              setCategoryExecutionsMerged((current) =>
+                current.map((exec) =>
+                  categoryKeywordKey(exec.keyword) === key
+                    ? mergeCategoryExecutionRow(exec, { keyword: exec.keyword, ...patch })
+                    : exec
+                )
+              );
             };
 
-            const refreshInFlightCategoryStatuses = async () => {
-              const pendingOrMissingArn = categoryExecutionsRef.current.filter(
-                (e) =>
-                  (e.status === 'PENDING' || e.status === 'STARTING') && !e.execution_arn
-              );
-              if (pendingOrMissingArn.length > 0) {
-                const linked = await Promise.all(
-                  pendingOrMissingArn.map(async (exec) => {
-                    const res = await fetch(
-                      `/api/pipeline/reconcile?keyword=${encodeURIComponent(exec.keyword.trim())}&since=${categoryBatchStartedAtRef.current}`
-                    );
-                    if (!res.ok) return exec;
-                    const data = await res.json();
-                    if (!data.found || !data.executionArn) return exec;
-                    return {
-                      ...exec,
-                      execution_arn: data.executionArn,
-                      run_id: data.executionName || String(data.executionArn).split(':').pop() || '',
-                      status: data.status || 'RUNNING',
-                      started_at: exec.started_at ?? Date.now(),
-                    };
-                  })
-                );
-                setCategoryExecutions((prev) => {
-                  const next = prev.map((exec) => {
-                    const updated = linked.find((r) => r.keyword === exec.keyword);
-                    return updated && updated.execution_arn ? updated : exec;
-                  });
-                  categoryExecutionsRef.current = next;
-                  return next;
-                });
-              }
-
-              const inFlight = categoryExecutionsRef.current.filter(
-                (e) =>
-                  e.execution_arn &&
-                  (e.status === 'RUNNING' || e.status === 'STARTING') &&
-                  !e.pipeline_summary?.pipeline_status
-              );
-              if (inFlight.length === 0) return;
-
-              const refreshed = await Promise.all(
-                inFlight.map(async (exec) => {
-                  try {
-                    const res = await fetch(
-                      `/api/pipeline/status?arn=${encodeURIComponent(exec.execution_arn)}`
-                    );
-                    const data: ExecutionStatusResponse = await res.json();
-                    const summary = normalizePipelineSummary(data.pipeline_summary);
-                    return {
-                      ...exec,
-                      status: data.status || exec.status,
-                      pipeline_summary: summary ?? exec.pipeline_summary ?? null,
-                      pipeline_status: summary?.pipeline_status ?? null,
-                    };
-                  } catch {
-                    return exec;
-                  }
-                })
-              );
-
-              setCategoryExecutions((prev) =>
-                prev.map((exec) => {
-                  const updated = refreshed.find((r) => r.keyword === exec.keyword);
-                  return updated ?? exec;
-                })
+            const refreshRunningCategoryStatuses = async () => {
+              const polled = await pollCategoryExecutionsFromAws(categoryExecutionsRef.current);
+              setCategoryExecutionsMerged((current) =>
+                applyCategoryExecutionUpdates(current, polled)
               );
             };
 
             const triggerCategoryChild = async (kw: string): Promise<void> => {
-              const existingRes = await fetch(
-                `/api/pipeline/reconcile?keyword=${encodeURIComponent(kw.trim())}&since=${categoryBatchStartedAtRef.current}`
-              );
-              if (existingRes.ok) {
-                const existing = await existingRes.json();
-                if (existing.found && existing.executionArn) {
-                  updateCategoryExecByKeyword(kw, {
-                    status: existing.status || 'RUNNING',
-                    execution_arn: existing.executionArn,
-                    run_id: existing.executionName || String(existing.executionArn).split(':').pop() || '',
-                    started_at: Date.now(),
-                  });
-                  return;
-                }
-              }
-
               updateCategoryExecByKeyword(kw, { status: 'STARTING', started_at: Date.now() });
               setStatusMessage(`TRIGGERING: ${kw}`);
 
@@ -2069,13 +2077,14 @@ const Dashboard = () => {
                 });
                 const triggerData = await triggerRes.json();
 
-                if (triggerRes.ok && triggerData.success) {
+                const arn = triggerData.executionArn || triggerData.execution_arn;
+                if (triggerRes.ok && arn && triggerData.success !== false) {
                   updateCategoryExecByKeyword(kw, {
                     status: 'RUNNING',
-                    execution_arn: triggerData.executionArn,
+                    execution_arn: arn,
                     run_id:
                       triggerData.executionName ||
-                      String(triggerData.executionArn).split(':').pop() ||
+                      String(arn).split(':').pop() ||
                       '',
                   });
                 } else {
@@ -2096,57 +2105,40 @@ const Dashboard = () => {
               lastTriggerTime = Date.now();
             };
 
-            for (let i = 0; i < generatedKeywords.length; i++) {
-              if (cancelTokenRef.current) break;
+            // Queue: trigger one variant at a time (5s apart), max 5 AWS RUNNING at once
+            const pendingQueue = [...generatedKeywords];
 
-              const kw = generatedKeywords[i];
+            while (pendingQueue.length > 0 && !cancelTokenRef.current) {
+              await refreshRunningCategoryStatuses();
 
-              // Max 5 in-flight; refresh AWS status so finished runs free slots promptly
-              while (true) {
-                if (cancelTokenRef.current) break;
+              const runningCount = countInFlightCategoryExecutions(categoryExecutionsRef.current);
+              const now = Date.now();
+              const elapsedSinceTrigger = now - lastTriggerTime;
+              const slotAvailable = runningCount < MAX_CONCURRENT;
+              const intervalElapsed =
+                lastTriggerTime === 0 || elapsedSinceTrigger >= TRIGGER_INTERVAL_MS;
 
-                await refreshInFlightCategoryStatuses();
-
-                const activeCount = countInFlightCategoryExecutions(categoryExecutionsRef.current);
-                const now = Date.now();
-                const timeSinceLast = now - lastTriggerTime;
-
-                if (activeCount < 5 && timeSinceLast >= 5000) {
-                  break;
-                }
-
-                if (activeCount >= 5) {
-                  setStatusMessage(`BATCH FULL (5/5). Waiting for a variant to finish...`);
-                } else if (timeSinceLast < 5000) {
-                  const waitSec = Math.ceil((5000 - timeSinceLast) / 1000);
-                  setStatusMessage(`WAITING ${waitSec}s BEFORE: ${kw}`);
-                }
-                await sleep(1000);
-              }
-
-              if (cancelTokenRef.current) break;
-
-              await triggerCategoryChild(kw);
-            }
-
-            // Drain variants that never left PENDING (batch gate stall / race)
-            if (!cancelTokenRef.current) {
-              const pendingKeywords = categoryExecutionsRef.current
-                .filter((e) => e.status === 'PENDING')
-                .map((e) => e.keyword);
-
-              for (const kw of pendingKeywords) {
-                if (cancelTokenRef.current) break;
-                while (countInFlightCategoryExecutions(categoryExecutionsRef.current) >= 5) {
-                  if (cancelTokenRef.current) break;
-                  await refreshInFlightCategoryStatuses();
-                  await sleep(1000);
-                }
-                if (cancelTokenRef.current) break;
+              if (slotAvailable && intervalElapsed) {
+                const kw = pendingQueue.shift()!;
                 await triggerCategoryChild(kw);
+                await refreshRunningCategoryStatuses();
+                continue;
               }
+
+              if (!slotAvailable) {
+                setStatusMessage(
+                  `BATCH FULL (${runningCount}/${MAX_CONCURRENT}). Waiting for a variant to finish...`
+                );
+              } else {
+                const waitSec = Math.max(
+                  1,
+                  Math.ceil((TRIGGER_INTERVAL_MS - elapsedSinceTrigger) / 1000)
+                );
+                setStatusMessage(`WAITING ${waitSec}s before next trigger...`);
+              }
+              await sleep(1000);
             }
-            // Only transition to final state if the user has not cancelled in the meantime.
+
             if (!cancelTokenRef.current) {
               setIsBatching(false);
               setStatusMessage('RUNNING');
@@ -2172,7 +2164,7 @@ const Dashboard = () => {
             throw new Error(triggerData.message || 'No data found for this search');
           }
 
-          setCategoryExecutions([]);
+          setCategoryExecutionsMerged([]);
           setCategoryKeywordsPreview(null);
           setExecutionArn(triggerData.executionArn);
           setPipelineStatus('POLLING');
@@ -2230,6 +2222,8 @@ const Dashboard = () => {
     alibabaRating,
     verifiedSupplier,
     searchModeMap,
+    pollCategoryExecutionsFromAws,
+    setCategoryExecutionsMerged,
   ]);
 
   // Automatically refine the currently loaded consolidated dataset when
@@ -2410,15 +2404,15 @@ const Dashboard = () => {
           const summary = normalizePipelineSummary(statusData.pipeline_summary);
           if (summary) {
             setPipelineSummary(summary);
-            setCategoryExecutions((prev) =>
+            setCategoryExecutionsMerged((prev) =>
               prev.map((e) =>
                 (e.keyword ?? '').trim() === selected
-                  ? {
-                      ...e,
+                  ? mergeCategoryExecutionRow(e, {
+                      keyword: e.keyword,
                       status: statusData.status || e.status,
                       pipeline_summary: summary,
                       pipeline_status: summary.pipeline_status,
-                    }
+                    })
                   : e
               )
             );
@@ -2526,13 +2520,7 @@ const Dashboard = () => {
           try {
             const res = await fetch(`/api/pipeline/status?arn=${encodeURIComponent(exec.execution_arn)}`);
             const data: ExecutionStatusResponse = await res.json();
-            const summary = normalizePipelineSummary(data.pipeline_summary);
-            return {
-              ...exec,
-              status: data.status || exec.status,
-              pipeline_summary: summary ?? exec.pipeline_summary ?? null,
-              pipeline_status: summary?.pipeline_status ?? null,
-            };
+            return categoryExecutionFromStatusApi(exec, data);
           } catch {
             return exec;
           }
@@ -2541,18 +2529,13 @@ const Dashboard = () => {
 
       if (cancelled) return;
 
-      setCategoryExecutions((prev) =>
-        prev.map((exec) => {
-          const updated = refreshed.find((r) => r.keyword === exec.keyword);
-          return updated ?? exec;
-        })
-      );
+      setCategoryExecutionsMerged((prev) => applyCategoryExecutionUpdates(prev, refreshed));
     })();
 
     return () => {
       cancelled = true;
     };
-  }, [searchingMode, pipelineStatus, categoryPendingSummaryKey]);
+  }, [searchingMode, pipelineStatus, categoryPendingSummaryKey, setCategoryExecutionsMerged]);
 
   // Polling Effect for Pipeline
   useEffect(() => {
@@ -2571,54 +2554,13 @@ const Dashboard = () => {
           let awsStatus = statusData.status;
           let categoryAllFinished = false;
 
-          // 2. Special handling for Category Based search: track individual keyword executions
-          if (searchingMode === 'CATEGORY BASED' && categoryExecutions.length > 0) {
-            const updatedExecutions = await Promise.all(
-              categoryExecutions.map(async (exec) => {
-                if (isTerminalAwsStatus(exec.status) && !needsBusinessSummaryRefresh(exec)) {
-                  return exec;
-                }
-
-                const now = Date.now();
-                if (
-                  exec.started_at &&
-                  now - exec.started_at > 5 * 60 * 1000 &&
-                  (exec.status === 'RUNNING' || exec.status === 'STARTING')
-                ) {
-                  console.warn(`Execution for ${exec.keyword} timed out after 5 minutes.`);
-                  return { ...exec, status: 'TIMED_OUT' };
-                }
-
-                if ((exec.status === 'PENDING' || exec.status === 'STARTING') && !exec.execution_arn) {
-                  const linked = await reconcileCategoryExecutionRow(exec);
-                  if (!linked.execution_arn) return exec;
-                  exec = linked;
-                }
-
-                if (!exec.execution_arn) return exec;
-
-                try {
-                  const res = await fetch(
-                    `/api/pipeline/status?arn=${encodeURIComponent(exec.execution_arn)}`
-                  );
-                  const data: ExecutionStatusResponse = await res.json();
-                  const childSummary = normalizePipelineSummary(data.pipeline_summary);
-                  const awsStatus = data.status || exec.status;
-
-                  return {
-                    ...exec,
-                    status: awsStatus,
-                    pipeline_summary: childSummary ?? exec.pipeline_summary ?? null,
-                    pipeline_status: childSummary?.pipeline_status ?? null,
-                  };
-                } catch (e) {
-                  console.error(`Error fetching status for child ${exec.keyword}:`, e);
-                  return exec;
-                }
-              })
+          // 2. Category mode: poll children from ref (avoids stale closure over categoryExecutions)
+          if (searchingMode === 'CATEGORY BASED' && categoryExecutionsRef.current.length > 0) {
+            const polled = await pollCategoryExecutionsFromAws(categoryExecutionsRef.current);
+            setCategoryExecutionsMerged((current) =>
+              applyCategoryExecutionUpdates(current, polled)
             );
-
-            setCategoryExecutions(updatedExecutions);
+            const updatedExecutions = categoryExecutionsRef.current;
 
             const batchTriggerDone = !isBatching;
             categoryAllFinished =
@@ -2790,7 +2732,7 @@ const Dashboard = () => {
         setPollingIntervalRef(null);
       }
     }
-  }, [pipelineStatus, executionArn, effectiveStageArn, keywordSearch, searchingMode, productCategory, categoryExecutions, getApiParams, hasLoadedKeywordPlanner, hasLoadedTrends, amazonFilters, hasLoadedAmazon, alibabaFilters, hasLoadedAlibaba, isBatching, reconcileCategoryExecutionRow]);
+  }, [pipelineStatus, executionArn, effectiveStageArn, keywordSearch, searchingMode, productCategory, getApiParams, hasLoadedKeywordPlanner, hasLoadedTrends, amazonFilters, hasLoadedAmazon, alibabaFilters, hasLoadedAlibaba, isBatching, pollCategoryExecutionsFromAws, setCategoryExecutionsMerged]);
 
 
   // Prevent hydration mismatch by only rendering on client
@@ -4038,7 +3980,10 @@ const Dashboard = () => {
                         >
                           <option value="ALL">Select a variant</option>
                           {categoryExecutions.map((exec) => {
-                            const health = getCategoryExecutionPipelineStatus(exec);
+                            const health = getCategoryExecutionDisplayStatus(exec, {
+                              amazonFilters,
+                              alibabaFilters,
+                            });
                             return (
                               <option key={exec.keyword} value={exec.keyword}>
                                 {exec.keyword} ({health})
@@ -4060,15 +4005,22 @@ const Dashboard = () => {
                         </thead>
                         <tbody>
                           {categoryExecutions.map((exec, idx) => {
-                            const pipelineHealth = getCategoryExecutionPipelineStatus(exec);
+                            const pipelineHealth = getCategoryExecutionDisplayStatus(exec, {
+                              amazonFilters,
+                              alibabaFilters,
+                            });
                             const badge = getPipelineStatusBadgeClasses(pipelineHealth);
                             const message =
                               exec.pipeline_summary?.message ||
-                              (pipelineHealth === 'RUNNING'
-                                ? 'Pipeline in progress...'
-                                : pipelineHealth === 'PENDING'
-                                  ? 'Waiting to start...'
-                                  : '—');
+                              (pipelineHealth === 'RUNNING' &&
+                              isTerminalAwsStatus(exec.status) &&
+                              !exec.pipeline_summary?.pipeline_status
+                                ? 'Finalizing pipeline results...'
+                                : pipelineHealth === 'RUNNING'
+                                  ? 'Pipeline in progress...'
+                                  : pipelineHealth === 'PENDING'
+                                    ? 'Waiting to start...'
+                                    : '—');
 
                             return (
                             <tr key={idx} className="border-b border-white/10 hover:bg-white/5 transition-colors">

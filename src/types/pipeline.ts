@@ -124,6 +124,22 @@ export interface CategoryExecution {
   pipeline_summary?: PipelineSummary | null;
 }
 
+/** Prefer loaded parquet row counts over resolver summary (Amazon may report unique keywords, not products). */
+export function resolveStageDisplayRows(
+  stageKey: string,
+  summaryRows: number | null | undefined,
+  loadedRows: number | null | undefined
+): number | null {
+  const loaded = typeof loadedRows === 'number' && loadedRows >= 0 ? loadedRows : null;
+  const summary = typeof summaryRows === 'number' && summaryRows >= 0 ? summaryRows : null;
+
+  if (loaded != null && summary != null) {
+    if (stageKey === 'amazon') return Math.max(loaded, summary);
+    return loaded > 0 ? loaded : summary;
+  }
+  return loaded ?? summary ?? null;
+}
+
 /** True when resolver produced per-stage entries (not an empty batch placeholder) */
 export function hasPipelineStageData(summary: PipelineSummary | null | undefined): boolean {
   if (!summary?.stages || typeof summary.stages !== 'object') return false;
@@ -138,7 +154,9 @@ export function isCategoryExecutionInFlight(exec: CategoryExecution): boolean {
   if (isTerminalAwsStatus(exec.status)) return false;
   // Resolver summary present — done for slot counting even if AWS status string is stale
   if (exec.pipeline_summary?.pipeline_status) return false;
-  return exec.status === 'RUNNING' || exec.status === 'STARTING';
+  // Only AWS RUNNING with a known ARN occupies a concurrent slot (max 5)
+  if (!exec.execution_arn) return false;
+  return exec.status === 'RUNNING';
 }
 
 /** True when no further Step Function polling is needed for this child */
@@ -155,10 +173,156 @@ export function countInFlightCategoryExecutions(executions: CategoryExecution[])
   return executions.filter(isCategoryExecutionInFlight).length;
 }
 
-/** Batch complete when every child is settled and none are still queued or in-flight */
+/** Batch complete when every child is settled and resolver summary is loaded where needed */
 export function areAllCategoryExecutionsFinished(executions: CategoryExecution[]): boolean {
   if (executions.length === 0) return false;
-  return executions.every((exec) => exec.status !== 'PENDING' && !isCategoryExecutionInFlight(exec));
+  return executions.every(
+    (exec) =>
+      exec.status !== 'PENDING' &&
+      !isCategoryExecutionInFlight(exec) &&
+      !needsBusinessSummaryRefresh(exec)
+  );
+}
+
+const AWS_STATUS_RANK: Record<string, number> = {
+  PENDING: 0,
+  STARTING: 1,
+  RUNNING: 2,
+  SUCCEEDED: 3,
+  FAILED: 3,
+  TIMED_OUT: 3,
+  ABORTED: 3,
+};
+
+export function categoryKeywordKey(keyword: string): string {
+  return (keyword ?? '').trim();
+}
+
+/** Monotonic merge — stale polls cannot regress ARN, AWS status, or resolver summary */
+export function mergeCategoryExecutionRow(
+  existing: CategoryExecution,
+  incoming: Partial<CategoryExecution>
+): CategoryExecution {
+  const merged: CategoryExecution = {
+    ...existing,
+    ...incoming,
+    keyword: existing.keyword,
+  };
+
+  if (incoming.status !== undefined && existing.status !== undefined) {
+    const existingRank = AWS_STATUS_RANK[existing.status] ?? 0;
+    const incomingRank = AWS_STATUS_RANK[incoming.status] ?? 0;
+    if (incomingRank < existingRank) {
+      merged.status = existing.status;
+    }
+  }
+
+  if (existing.execution_arn && (!incoming.execution_arn || incoming.execution_arn === '')) {
+    merged.execution_arn = existing.execution_arn;
+    // Stale poll / abandon artifact must not downgrade a row that already has an AWS execution
+    const existingRank = AWS_STATUS_RANK[existing.status ?? ''] ?? 0;
+    const incomingRank = AWS_STATUS_RANK[incoming.status ?? ''] ?? 0;
+    if (incomingRank < existingRank || incoming.status === 'FAILED' || incoming.status === 'PENDING') {
+      merged.status = existing.status;
+      merged.run_id = existing.run_id || merged.run_id;
+      merged.pipeline_summary = existing.pipeline_summary ?? merged.pipeline_summary;
+      merged.pipeline_status = existing.pipeline_status ?? merged.pipeline_status;
+      merged.started_at = existing.started_at ?? merged.started_at;
+    }
+  }
+
+  if (existing.pipeline_summary?.pipeline_status && !incoming.pipeline_summary?.pipeline_status) {
+    merged.pipeline_summary = existing.pipeline_summary;
+    merged.pipeline_status = existing.pipeline_status ?? existing.pipeline_summary.pipeline_status;
+  } else if (incoming.pipeline_summary?.pipeline_status) {
+    merged.pipeline_status = incoming.pipeline_summary.pipeline_status;
+  }
+
+  if (existing.started_at && incoming.started_at === undefined) {
+    merged.started_at = existing.started_at;
+  }
+
+  if (existing.run_id && !incoming.run_id) {
+    merged.run_id = existing.run_id;
+  }
+
+  return merged;
+}
+
+export function applyCategoryExecutionUpdates(
+  current: CategoryExecution[],
+  updates: Array<Partial<CategoryExecution> & { keyword: string }>
+): CategoryExecution[] {
+  const byKeyword = new Map(updates.map((u) => [categoryKeywordKey(u.keyword), u]));
+  return current.map((exec) => {
+    const update = byKeyword.get(categoryKeywordKey(exec.keyword));
+    if (!update) return exec;
+    // Stale poll snapshot: skip only when poll adds no new status or resolver summary
+    if (
+      exec.execution_arn &&
+      (!update.execution_arn || update.execution_arn === '') &&
+      update.status === exec.status &&
+      !update.pipeline_summary?.pipeline_status
+    ) {
+      return exec;
+    }
+    return mergeCategoryExecutionRow(exec, update);
+  });
+}
+
+/** Apply DescribeExecution response without losing prior settled state */
+export function categoryExecutionFromStatusApi(
+  existing: CategoryExecution,
+  data: ExecutionStatusResponse
+): CategoryExecution {
+  const summary = normalizePipelineSummary(data.pipeline_summary);
+  return mergeCategoryExecutionRow(existing, {
+    keyword: existing.keyword,
+    status: data.status || existing.status,
+    pipeline_summary: summary ?? existing.pipeline_summary ?? null,
+    pipeline_status: summary?.pipeline_status ?? existing.pipeline_status ?? null,
+  });
+}
+
+/** Mark stuck PENDING rows FAILED once most of the batch has settled (3+ min) */
+export function abandonStuckCategoryPendingExecutions(
+  executions: CategoryExecution[],
+  batchStartedAtMs: number,
+  nowMs: number = Date.now()
+): CategoryExecution[] {
+  const minElapsedMs = 3 * 60 * 1000;
+  if (batchStartedAtMs <= 0 || nowMs - batchStartedAtMs < minElapsedMs) {
+    return executions;
+  }
+
+  const settled = executions.filter(isCategoryExecutionSettled).length;
+  const total = executions.length;
+  if (total === 0 || settled / total < 0.85) {
+    return executions;
+  }
+
+  return executions.map((exec) => {
+    if (exec.status !== 'PENDING' || exec.execution_arn) return exec;
+    return mergeCategoryExecutionRow(exec, {
+      keyword: exec.keyword,
+      status: 'FAILED',
+      pipeline_status: 'FAILED',
+      pipeline_summary: {
+        pipeline_status: 'FAILED',
+        message: 'Variant did not start within the batch window',
+        stages: {},
+      },
+    });
+  });
+}
+
+/** True when batch triggering is done and every child is fully settled */
+export function isCategoryBatchReadyToComplete(
+  executions: CategoryExecution[],
+  _batchStartedAtMs?: number,
+  _nowMs?: number
+): boolean {
+  return areAllCategoryExecutionsFinished(executions);
 }
 
 /** True when we should keep polling DescribeExecution for business summary */
@@ -177,7 +341,11 @@ export function getCategoryExecutionPipelineStatus(
     return exec.pipeline_summary.pipeline_status;
   }
 
-  if (exec.status === 'PENDING' || exec.status === 'STARTING' || !exec.status) {
+  if (exec.status === 'STARTING') {
+    return 'RUNNING';
+  }
+
+  if (exec.status === 'PENDING' || !exec.status) {
     return 'PENDING';
   }
 
@@ -234,6 +402,67 @@ export type PipelineDisplayStatus =
   | 'PENDING'
   | 'ABORTED'
   | string;
+
+export interface MarketplaceFilterConfig {
+  amazonFilters: boolean;
+  alibabaFilters: boolean;
+}
+
+const CORE_STAGE_OK = new Set(['SUCCEEDED', 'EMPTY']);
+
+export function isCoreStageOk(status: string | undefined | null): boolean {
+  return !!status && CORE_STAGE_OK.has(status);
+}
+
+/**
+ * AWS resolve_pipeline_status marks disabled marketplace stages SKIPPED, which yields
+ * PARTIALLY_SUCCEEDED even when KWP + Trends completed. When marketplace filters are off,
+ * treat that as full success for UI badges and batch progress.
+ */
+export function getEffectivePipelineStatus(
+  rawStatus: PipelineDisplayStatus,
+  summary: PipelineSummary | null | undefined,
+  filters: MarketplaceFilterConfig
+): PipelineDisplayStatus {
+  if (rawStatus !== 'PARTIALLY_SUCCEEDED' || !summary?.stages) {
+    return rawStatus;
+  }
+
+  const kwp = summary.stages.keyword_planner?.status;
+  const trends = summary.stages.google_trends?.status;
+  if (kwp === 'FAILED' || trends === 'FAILED') {
+    return 'PARTIALLY_SUCCEEDED';
+  }
+
+  const coreOk = isCoreStageOk(kwp) && isCoreStageOk(trends);
+  if (!coreOk) return 'PARTIALLY_SUCCEEDED';
+
+  if (!filters.amazonFilters && !filters.alibabaFilters) {
+    return 'SUCCEEDED';
+  }
+
+  if (!filters.amazonFilters && filters.alibabaFilters) {
+    const ali = summary.stages.alibaba?.status;
+    if (ali === 'FAILED') return 'PARTIALLY_SUCCEEDED';
+    if (isCoreStageOk(ali)) return 'SUCCEEDED';
+  }
+
+  if (filters.amazonFilters && !filters.alibabaFilters) {
+    const amz = summary.stages.amazon?.status;
+    if (amz === 'FAILED') return 'PARTIALLY_SUCCEEDED';
+    if (isCoreStageOk(amz)) return 'SUCCEEDED';
+  }
+
+  return 'PARTIALLY_SUCCEEDED';
+}
+
+export function getCategoryExecutionDisplayStatus(
+  exec: CategoryExecution,
+  filters: MarketplaceFilterConfig
+): PipelineDisplayStatus {
+  const raw = getCategoryExecutionPipelineStatus(exec);
+  return getEffectivePipelineStatus(raw, exec.pipeline_summary ?? null, filters);
+}
 
 /** True when a consolidated row satisfies the user-configured Google Trend Score minimum */
 export function meetsGoogleTrendScoreThreshold(

@@ -1,12 +1,16 @@
 /**
- * Keyword Planner → Amazon product matching.
+ * Keyword Planner → Amazon product matching (consolidated table).
  *
- * Strategy by keyword word count:
- * - 1 word  → broad Amazon category
- * - 2 words → specific category
- * - 3+ words → most specific subcategory, then walk up to parent categories
+ * Category strategy by keyword word count:
+ * - 1 word  ("Baby")           → broad Amazon category → best organic product
+ * - 2 words ("Baby Toys")      → specific Amazon category → best organic product
+ * - 3+ words ("Electric Breast Pump")
+ *     → most specific subcategory first ("electric breast pump")
+ *     → walk up one level by dropping leading modifiers ("breast pump")
+ *     → then 1-word broad fallback if needed
  *
- * Within each category level, picks the best organic performer (reviews, rating, BSR).
+ * At each category level, pick the highest-scoring organic listing
+ * (reviews, rating, BSR, sales). Sponsored listings are excluded.
  */
 
 export type AmazonProductRow = Record<string, unknown>;
@@ -19,9 +23,13 @@ const CATEGORY_FIELDS = [
   'subcategory',
   'category_path',
   'browse_node',
+  'full_category',
 ] as const;
 
 const SPONSORED_TRUTHY = new Set(['true', '1', 'yes']);
+
+/** Title relevance weight when breaking ties within the same category level */
+const TITLE_TIEBREAKER_WEIGHT = 0.08;
 
 function normalizeText(value: unknown): string {
   return String(value ?? '')
@@ -37,38 +45,25 @@ export function tokenizeKeyword(keyword: string): string[] {
 }
 
 /**
- * Retailers, distributors, and comparison-site brands that carry products
- * but are not themselves product categories on Amazon.
- * Stripped before category matching so "Walmart Cribs" → "Cribs".
+ * Retailers and noise tokens stripped before category matching.
+ * "Walmart Cribs" → "cribs", "Carters Baby Clothes" → "baby clothes"
  */
 const RETAILER_NOISE_TOKENS = new Set([
-  // Mass retailers
   'walmart', 'target', 'costco', 'sam', 'sams', 'bjs', 'kmart', 'sears',
   'kohls', 'jcpenney', 'macys', 'nordstrom', 'marshalls', 'tjmaxx',
   'homegoods', 'homesense', 'ross',
-  // Baby / kids specialty
   'babylist', 'buybuybaby', 'buybuy', 'carters', 'oshkosh',
-  // Home / furniture
   'wayfair', 'ikea', 'pottery', 'barn', 'west', 'elm', 'crate', 'barrel',
   'overstock', 'cb2', 'restoration', 'hardware',
-  // Electronics / general
   'bestbuy', 'best', 'buy', 'staples', 'officedepot', 'costplus',
   'worldmarket', 'world', 'market',
-  // Online
   'amazon', 'ebay', 'etsy', 'chewy', 'zappos', 'jet',
-  // Grocery / pharmacy
-  'walmart', 'walgreens', 'cvs', 'rite', 'aid', 'kroger', 'safeway',
-  // Comparison / listing intent
+  'walgreens', 'cvs', 'rite', 'aid', 'kroger', 'safeway',
   'cheap', 'cheapest', 'discount', 'deals', 'sale', 'clearance',
-  'buy', 'shop', 'shopping', 'store', 'stores', 'online',
+  'shop', 'shopping', 'store', 'stores', 'online',
   'near', 'me', 'local',
 ]);
 
-/**
- * Strip retailer/noise tokens from the keyword, returning the core product intent.
- * e.g. "Walmart Cribs" → "Cribs", "Target Baby Toys" → "Baby Toys"
- * Falls back to the full tokenized form if stripping empties it.
- */
 export function stripRetailerNoise(keyword: string): string {
   const tokens = tokenizeKeyword(keyword);
   const core = tokens.filter((w) => !RETAILER_NOISE_TOKENS.has(w));
@@ -76,8 +71,12 @@ export function stripRetailerNoise(keyword: string): string {
 }
 
 /**
- * Category phrases to try, most specific first.
- * 3+ words: "electric breast pump" → "breast pump" (stops at 2-word parent).
+ * Category levels to try, most specific first.
+ *
+ * 1 word  → ["baby"]
+ * 2 words → ["baby toys"]
+ * 3+ words → full phrase, then drop leading words to reach parent categories:
+ *   "electric breast pump" → ["electric breast pump", "breast pump", "pump"]
  */
 export function buildAmazonCategoryLevels(keyword: string): string[] {
   const words = tokenizeKeyword(keyword);
@@ -86,17 +85,22 @@ export function buildAmazonCategoryLevels(keyword: string): string[] {
   if (words.length === 2) return [words.join(' ')];
 
   const levels: string[] = [];
-  for (let len = words.length; len >= 2; len -= 1) {
-    levels.push(words.slice(0, len).join(' '));
+  // Most specific subcategory
+  levels.push(words.join(' '));
+
+  // Walk up: drop leading modifier words until a 2-word parent remains
+  for (let start = 1; start <= words.length - 2; start += 1) {
+    levels.push(words.slice(start).join(' '));
   }
-  return levels;
+
+  // 1-word broad category (final hierarchy fallback for long phrases)
+  levels.push(words[words.length - 1]);
+
+  return [...new Set(levels)];
 }
 
 /**
- * Build all category level phrases to try:
- * 1. Levels from the retailer-stripped core intent (primary)
- * 2. Levels from the full original keyword (fallback — catches branded products)
- * Deduplicates, preserving order.
+ * Levels from retailer-stripped core first, then full phrase if different.
  */
 export function buildAllMatchLevels(keyword: string): string[] {
   const core = stripRetailerNoise(keyword);
@@ -168,8 +172,8 @@ export function parseBestsellerRank(rank: unknown): number {
 }
 
 /**
- * Higher = better organic market signal (reviews, rating, lower BSR).
- * Returns -1 for sponsored listings so they sort last / can be filtered out.
+ * Higher = better organic market signal (reviews, rating, lower BSR, sales).
+ * Returns -1 for sponsored listings.
  */
 export function amazonOrganicPerformanceScore(row: AmazonProductRow): number {
   if (isSponsoredAmazonRow(row)) return -1;
@@ -180,7 +184,7 @@ export function amazonOrganicPerformanceScore(row: AmazonProductRow): number {
   const sales = Number(row.estimated_monthly_sales ?? row.monthly_sales ?? row.units_sold ?? 0);
 
   const reviewScore = Math.log10(Math.max(reviews, 0) + 1) * 22;
-  const ratingScore = Math.min(Math.max(rating, 0), 5) / 5 * 28;
+  const ratingScore = (Math.min(Math.max(rating, 0), 5) / 5) * 28;
   const bsrScore =
     Number.isFinite(bsr) && bsr < Number.POSITIVE_INFINITY
       ? Math.max(0, 35 - Math.log10(bsr + 1) * 9)
@@ -198,7 +202,7 @@ function categoryMatchesLevel(categoryTexts: string[], levelPhrase: string): boo
   if (levelWords.length === 0) return false;
 
   return categoryTexts.some((cat) => {
-    if (cat.includes(levelNorm)) return true;
+    if (cat.includes(levelNorm) || levelNorm.includes(cat)) return true;
     return levelWords.every((w) => cat.includes(w));
   });
 }
@@ -215,22 +219,55 @@ function titleMatchesLevel(row: AmazonProductRow, levelPhrase: string): boolean 
   return levelWords.every((w) => title.includes(w));
 }
 
-function pickBestPerformer(rows: AmazonProductRow[]): AmazonProductRow | null {
+export function getAmazonRowAsin(row: AmazonProductRow): string | null {
+  const asin = row.a_sin ?? row.asin;
+  if (asin == null || asin === '') return null;
+  return String(asin).trim().toUpperCase();
+}
+
+/** 0–100 title overlap — used only as a tiebreaker within a category level */
+export function scoreTitleRelevance(kwpKeyword: string, row: AmazonProductRow): number {
+  const title = normalizeText(row.title ?? row.product_title ?? '');
+  const kwNorm = normalizeText(stripRetailerNoise(kwpKeyword));
+  if (!title || !kwNorm) return 0;
+  if (title.includes(kwNorm)) return 100;
+
+  const words = kwNorm.split(' ').filter((w) => w.length > 1);
+  if (words.length === 0) return 0;
+  const hits = words.filter((w) => title.includes(w)).length;
+  return Math.round((hits / words.length) * 85);
+}
+
+function filterExcludedAsins(
+  rows: AmazonProductRow[],
+  excludeAsins?: Set<string>
+): AmazonProductRow[] {
+  if (!excludeAsins?.size) return rows;
+  return rows.filter((row) => {
+    const asin = getAmazonRowAsin(row);
+    return !asin || !excludeAsins.has(asin);
+  });
+}
+
+/** Best organic performer at a category level; title relevance breaks ties only */
+function pickBestPerformer(rows: AmazonProductRow[], kwpKeyword?: string): AmazonProductRow | null {
   if (rows.length === 0) return null;
 
-  let best = rows[0];
-  let bestScore = amazonOrganicPerformanceScore(best);
+  let best: AmazonProductRow | null = null;
+  let bestCombined = -1;
 
-  for (let i = 1; i < rows.length; i += 1) {
-    const row = rows[i];
-    const score = amazonOrganicPerformanceScore(row);
-    if (score > bestScore) {
+  for (const row of rows) {
+    const organic = amazonOrganicPerformanceScore(row);
+    if (organic < 0) continue;
+    const tiebreak = kwpKeyword ? scoreTitleRelevance(kwpKeyword, row) * TITLE_TIEBREAKER_WEIGHT : 0;
+    const combined = organic + tiebreak;
+    if (combined > bestCombined) {
       best = row;
-      bestScore = score;
+      bestCombined = combined;
     }
   }
 
-  return bestScore >= 0 ? best : null;
+  return best;
 }
 
 function filterOrganicPreferring(rows: AmazonProductRow[]): AmazonProductRow[] {
@@ -238,66 +275,70 @@ function filterOrganicPreferring(rows: AmazonProductRow[]): AmazonProductRow[] {
   return organic.length > 0 ? organic : rows;
 }
 
+function buildCandidatePool(
+  allAmazonRows: AmazonProductRow[],
+  scopedAmazonRows: AmazonProductRow[] | undefined,
+  excludeAsins?: Set<string>
+): AmazonProductRow[] {
+  const scoped = scopedAmazonRows?.length ? scopedAmazonRows : [];
+  const primary = filterExcludedAsins(
+    filterOrganicPreferring(scoped.length > 0 ? scoped : allAmazonRows),
+    excludeAsins
+  );
+  if (primary.length > 0) return primary;
+
+  if (scoped.length > 0) {
+    const widened = filterExcludedAsins(filterOrganicPreferring(allAmazonRows), excludeAsins);
+    if (widened.length > 0) return widened;
+  }
+
+  return [];
+}
+
 /**
- * Match one KWP keyword to the best Amazon product in the candidate pool.
+ * Match one Keyword Planner row to the best Amazon product.
  *
- * Pass order:
- * 1. Category matching using retailer-stripped core intent + full phrase levels
- * 2. Title matching using the same level sequence
- * 3. Exact keyword field match on the original keyword
- * 4. Title matching on the stripped core alone (broadest fallback)
+ * Pass order (category-first):
+ * 1. Category field match at each level (specific → parent → broad)
+ * 2. Title match at each level (when category metadata is missing)
+ * 3. Exact keyword field match on the search keyword
  */
 export function matchAmazonForKwpKeyword(
   kwpKeyword: string,
   allAmazonRows: AmazonProductRow[],
-  scopedAmazonRows?: AmazonProductRow[]
+  scopedAmazonRows?: AmazonProductRow[],
+  excludeAsins?: Set<string>
 ): AmazonProductRow | null {
-  const scoped = scopedAmazonRows?.length ? scopedAmazonRows : [];
-  const pool = scoped.length > 0 ? scoped : allAmazonRows;
-  if (!pool.length || !kwpKeyword.trim()) return null;
+  if (!kwpKeyword.trim()) return null;
 
-  const candidates = filterOrganicPreferring(pool);
+  const candidates = buildCandidatePool(allAmazonRows, scopedAmazonRows, excludeAsins);
+  if (!candidates.length) return null;
 
-  // All levels to try: core-intent first (retailer stripped), then full phrase
   const levels = buildAllMatchLevels(kwpKeyword);
+  const kwNorm = normalizeText(kwpKeyword);
 
-  // Pass 1: category field matching
+  // Pass 1: category / subcategory match — most specific level first
   for (const level of levels) {
     const hits = candidates.filter((row) =>
       categoryMatchesLevel(getProductCategoryTexts(row), level)
     );
-    const best = pickBestPerformer(hits);
+    const best = pickBestPerformer(hits, kwpKeyword);
     if (best) return best;
   }
 
-  // Pass 2: title matching
+  // Pass 2: title match at each category level (products without category fields)
   for (const level of levels) {
     const hits = candidates.filter((row) => titleMatchesLevel(row, level));
-    const best = pickBestPerformer(hits);
+    const best = pickBestPerformer(hits, kwpKeyword);
     if (best) return best;
   }
 
-  // Pass 3: exact keyword field match on original phrase
-  const kwNorm = normalizeText(kwpKeyword);
+  // Pass 3: exact keyword field match on the KWP phrase
   const exactHits = candidates.filter(
     (row) => normalizeText(row.keyword ?? row.sub_keyword ?? '') === kwNorm
   );
-  const exactBest = pickBestPerformer(exactHits);
+  const exactBest = pickBestPerformer(exactHits, kwpKeyword);
   if (exactBest) return exactBest;
-
-  // Pass 4: broadest title fallback on stripped core (single remaining product word)
-  const core = stripRetailerNoise(kwpKeyword);
-  if (core !== normalizeText(kwpKeyword)) {
-    const coreWords = tokenizeKeyword(core);
-    if (coreWords.length > 0) {
-      // Require all core words to appear in the title
-      const coreHits = candidates.filter((row) => {
-        const title = normalizeText(row.title ?? row.product_title ?? '');
-        return coreWords.every((w) => title.includes(w));
-      });
-      return pickBestPerformer(coreHits);
-    }
-  }
 
   return null;
 }

@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { fetchKeywordsFromPlanner } from "@/lib/step-function";
 import { logger } from "@/lib/logger";
+import { resolveVariantLimitMax } from "@/lib/searchFilters";
 
 export async function POST(request: NextRequest) {
     try {
@@ -21,12 +22,13 @@ export async function POST(request: NextRequest) {
             );
         }
 
-        logger.info(`Generating keywords | Category: ${category} | Geo: ${geo || 'US'} | Limit: ${limit || 50}`);
+        const resolvedLimit = resolveVariantLimitMax(limit);
+        logger.info(`Generating keywords | Category: ${category} | Geo: ${geo || 'US'} | Limit: ${resolvedLimit}`);
 
         const keywords = await fetchKeywordsFromPlanner(
             category,
             geo || "US",
-            limit || 50,
+            resolvedLimit,
             search_volume_min,
             search_volume_max,
             blacklist || []
