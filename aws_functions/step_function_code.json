@@ -1,0 +1,371 @@
+{
+    "Comment": "Manual Mode — Stage 1 Keyword Planner Pipeline",
+    "StartAt": "InitializeContext",
+    "States": {
+        "InitializeContext": {
+            "Type": "Pass",
+            "ResultPath": "$",
+            "Parameters": {
+                "input.$": "$",
+                "data": {}
+            },
+            "Next": "KeywordPlannerFetch"
+        },
+        "KeywordPlannerFetch": {
+            "Type": "Task",
+            "Resource": "arn:aws:lambda:eu-north-1:894037914878:function:keyword_planner",
+            "Parameters": {
+                "keyword.$": "States.Array($.input.keyword)",
+                "geo.$": "$.input.geo",
+                "variant_limit.$": "$.input.variant_limit",
+                "min_monthly_searches.$": "$.input.search_volume_min",
+                "max_monthly_searches.$": "$.input.search_volume_max",
+                "blacklisted_words.$": "$.input.blacklist",
+                "timestamp.$": "$.input.timestamp"
+            },
+            "ResultPath": "$.kwp_fetch",
+            "Next": "CheckKeywordFetchResults"
+        },
+        "CheckKeywordFetchResults": {
+            "Type": "Choice",
+            "Choices": [
+                {
+                    "Variable": "$.kwp_fetch.status",
+                    "StringEquals": "EMPTY",
+                    "Next": "End_NoStableKeyword"
+                },
+                {
+                    "Variable": "$.kwp_fetch.status",
+                    "StringEquals": "FAILED",
+                    "Next": "End_NoStableKeyword"
+                }
+            ],
+            "Default": "KeywordPlannerClean"
+        },
+        "KeywordPlannerClean": {
+            "Type": "Task",
+            "Resource": "arn:aws:lambda:eu-north-1:894037914878:function:keyword_planner_clean_function",
+            "Parameters": {
+                "input_bucket.$": "$.kwp_fetch.s3_bucket",
+                "input_key.$": "$.kwp_fetch.s3_key",
+                "search_mode.$": "$.input.search_mode",
+                "search_category.$": "$.input.search_category"
+            },
+            "ResultPath": "$.kwp_clean",
+            "Next": "GoogleTrendsFetch"
+        },
+        "End_NoStableKeyword": {
+            "Type": "Pass",
+            "Result": {
+                "status": "All variants removed — no stable variants from Keyword Planner"
+            },
+            "ResultPath": "$.kwp_status",
+            "Next": "ResolvePipelineStatus"
+        },
+        "GoogleTrendsFetch": {
+            "Type": "Task",
+            "Resource": "arn:aws:lambda:eu-north-1:894037914878:function:Google_trends",
+            "Parameters": {
+                "keyword.$": "$.kwp_fetch.limited_variants.selected_variants[*].keyword",
+                "geo.$": "$.input.geo",
+                "trend_window_months.$": "$.input.trend_window_months",
+                "search_mode.$": "$.input.search_mode",
+                "min_trend_score.$": "$.input.google_trend_score",
+                "timestamp.$": "$.input.timestamp"
+            },
+            "ResultPath": "$.trends_fetch",
+            "Next": "CheckTrendsFetchResults"
+        },
+        "CheckTrendsFetchResults": {
+            "Type": "Choice",
+            "Choices": [
+                {
+                    "Variable": "$.trends_fetch.status",
+                    "StringEquals": "EMPTY",
+                    "Next": "TrendsEmptySkip"
+                },
+                {
+                    "Variable": "$.trends_fetch.status",
+                    "StringEquals": "FAILED",
+                    "Next": "TrendsEmptySkip"
+                }
+            ],
+            "Default": "GoogleTrendsClean"
+        },
+        "TrendsEmptySkip": {
+            "Type": "Pass",
+            "Result": {
+                "status": "No trends found — skipping trends stage but continuing to marketplace"
+            },
+            "ResultPath": "$.trends_status",
+            "Next": "CheckMarketplaceModules"
+        },
+        "GoogleTrendsClean": {
+            "Type": "Task",
+            "Resource": "arn:aws:lambda:eu-north-1:894037914878:function:google_trends_clean_function",
+            "Parameters": {
+                "input_bucket.$": "$.trends_fetch.s3_bucket",
+                "input_key.$": "$.trends_fetch.s3_key",
+                "search_mode.$": "$.input.search_mode",
+                "search_category.$": "$.input.search_category"
+            },
+            "ResultPath": "$.trends_clean",
+            "Next": "CheckTrendResults"
+        },
+        "CheckTrendResults": {
+            "Type": "Choice",
+            "Choices": [
+                {
+                    "Variable": "$.trends_clean.status",
+                    "StringEquals": "EMPTY",
+                    "Next": "CheckMarketplaceModules"
+                },
+                {
+                    "Variable": "$.trends_clean.status",
+                    "StringEquals": "FAILED",
+                    "Next": "CheckMarketplaceModules"
+                }
+            ],
+            "Default": "TrendsStageComplete"
+        },
+        "TrendsStageComplete": {
+            "Type": "Pass",
+            "Result": {
+                "status": "Google Trends filtering complete"
+            },
+            "ResultPath": "$.trends_status",
+            "Next": "CheckMarketplaceModules"
+        },
+        "CheckMarketplaceModules": {
+            "Type": "Choice",
+            "Choices": [
+                {
+                    "And": [
+                        {
+                            "Variable": "$.input.enable_amazon",
+                            "IsPresent": true
+                        },
+                        {
+                            "Variable": "$.input.enable_amazon",
+                            "BooleanEquals": true
+                        }
+                    ],
+                    "Next": "AmazonFetch"
+                },
+                {
+                    "And": [
+                        {
+                            "Variable": "$.input.enable_alibaba",
+                            "IsPresent": true
+                        },
+                        {
+                            "Variable": "$.input.enable_alibaba",
+                            "BooleanEquals": true
+                        }
+                    ],
+                    "Next": "AlibabaFetchStandalone"
+                }
+            ],
+            "Default": "End_NoMarketplaceSelected"
+        },
+        "AmazonFetch": {
+            "Type": "Task",
+            "Resource": "arn:aws:lambda:eu-north-1:894037914878:function:Amazon",
+            "Parameters": {
+                "keyword.$": "$.input.keyword",
+                "variant_keywords.$": "$.kwp_fetch.limited_variants.selected_variants[*].keyword",
+                "country.$": "$.input.geo",
+                "size.$": "$.input.size",
+                "timestamp.$": "$.input.timestamp",
+                "max_variant_searches": 8
+            },
+            "ResultPath": "$.amazon_fetch",
+            "Next": "CheckAmazonResults"
+        },
+        "CheckAmazonResults": {
+            "Type": "Choice",
+            "Choices": [
+                {
+                    "Or": [
+                        {
+                            "Variable": "$.amazon_fetch.status",
+                            "StringEquals": "FAILED"
+                        },
+                        {
+                            "Variable": "$.amazon_fetch.status",
+                            "StringEquals": "EMPTY"
+                        },
+                        {
+                            "Variable": "$.amazon_fetch.status",
+                            "StringEquals": "SKIPPED"
+                        }
+                    ],
+                    "Next": "SkipAmazonGoToAlibaba"
+                }
+            ],
+            "Default": "AmazonClean"
+        },
+        "SkipAmazonGoToAlibaba": {
+            "Type": "Pass",
+            "Result": {
+                "status": "Amazon returned empty — skipping clean stage"
+            },
+            "ResultPath": "$.amazon_status",
+            "Next": "CheckAlibabaStandalone"
+        },
+        "CheckAlibabaStandalone": {
+            "Type": "Choice",
+            "Choices": [
+                {
+                    "And": [
+                        {
+                            "Variable": "$.input.enable_alibaba",
+                            "IsPresent": true
+                        },
+                        {
+                            "Variable": "$.input.enable_alibaba",
+                            "BooleanEquals": true
+                        }
+                    ],
+                    "Next": "AlibabaFetchStandalone"
+                }
+            ],
+            "Default": "MarketplaceStageComplete"
+        },
+        "AmazonClean": {
+            "Type": "Task",
+            "Resource": "arn:aws:lambda:eu-north-1:894037914878:function:amazon_clean_function",
+            "Parameters": {
+                "input_bucket.$": "$.amazon_fetch.s3_bucket",
+                "input_key.$": "$.amazon_fetch.s3_key",
+                "search_mode.$": "$.input.search_mode",
+                "search_category.$": "$.input.search_category",
+                "size.$": "$.input.size",
+                "enable_amazon": true,
+                "amz_price_min.$": "$.input.amz_price_min",
+                "amz_price_max.$": "$.input.amz_price_max",
+                "reviews_min.$": "$.input.reviews_min",
+                "reviews_max.$": "$.input.reviews_max",
+                "rating_min.$": "$.input.rating_min"
+            },
+            "ResultPath": "$.amazon_clean",
+            "Next": "AmazonFCLCalculation"
+        },
+        "AmazonFCLCalculation": {
+            "Type": "Task",
+            "Resource": "arn:aws:lambda:eu-north-1:894037914878:function:amazon_fcl_enrichment",
+            "Parameters": {
+                "amazon_file.$": "$.amazon_clean.output_file",
+                "fcl_percentage.$": "$.input.fcl_percentage"
+            },
+            "ResultPath": "$.amazon_fcl",
+            "Next": "CheckAlibabaAfterAmazon"
+        },
+        "CheckAlibabaAfterAmazon": {
+            "Type": "Choice",
+            "Choices": [
+                {
+                    "And": [
+                        {
+                            "Variable": "$.input.enable_alibaba",
+                            "IsPresent": true
+                        },
+                        {
+                            "Variable": "$.input.enable_alibaba",
+                            "BooleanEquals": true
+                        }
+                    ],
+                    "Next": "AlibabaFetchWithAmazonData"
+                }
+            ],
+            "Default": "MarketplaceStageComplete"
+        },
+        "AlibabaFetchStandalone": {
+            "Type": "Task",
+            "Resource": "arn:aws:lambda:eu-north-1:894037914878:function:Alibaba",
+            "Parameters": {
+                "keyword.$": "$.input.keyword",
+                "size.$": "$.input.size",
+                "timestamp.$": "$.input.timestamp"
+            },
+            "ResultPath": "$.alibaba_fetch",
+            "Next": "CheckAlibabaResults"
+        },
+        "AlibabaFetchWithAmazonData": {
+            "Type": "Task",
+            "Resource": "arn:aws:lambda:eu-north-1:894037914878:function:Alibaba",
+            "Parameters": {
+                "keyword.$": "$.input.keyword",
+                "size.$": "$.input.size",
+                "timestamp.$": "$.input.timestamp",
+                "target_browse_node.$": "$.amazon_clean.target_browse_node",
+                "fallback_browse_node.$": "$.amazon_clean.fallback_browse_node"
+            },
+            "ResultPath": "$.alibaba_fetch",
+            "Next": "CheckAlibabaResults"
+        },
+        "CheckAlibabaResults": {
+            "Type": "Choice",
+            "Choices": [
+                {
+                    "Or": [
+                        {
+                            "Variable": "$.alibaba_fetch.status",
+                            "StringEquals": "FAILED"
+                        },
+                        {
+                            "Variable": "$.alibaba_fetch.status",
+                            "StringEquals": "EMPTY"
+                        },
+                        {
+                            "Variable": "$.alibaba_fetch.status",
+                            "StringEquals": "SKIPPED"
+                        }
+                    ],
+                    "Next": "MarketplaceStageComplete"
+                }
+            ],
+            "Default": "AlibabaClean"
+        },
+        "AlibabaClean": {
+            "Type": "Task",
+            "Resource": "arn:aws:lambda:eu-north-1:894037914878:function:Alibaba_clean_function",
+            "Parameters": {
+                "input_bucket.$": "$.alibaba_fetch.data.s3_bucket",
+                "input_key.$": "$.alibaba_fetch.data.s3_key",
+                "search_mode.$": "$.input.search_mode",
+                "search_category.$": "$.input.search_category",
+                "enable_alibaba": true,
+                "margin_min.$": "$.input.margin_min",
+                "moq_max.$": "$.input.moq_max",
+                "supplier_rating_min.$": "$.input.supplier_rating_min",
+                "verified_supplier.$": "$.input.verified_supplier",
+                "size.$": "$.input.size"
+            },
+            "ResultPath": "$.alibaba_clean",
+            "Next": "MarketplaceStageComplete"
+        },
+        "MarketplaceStageComplete": {
+            "Type": "Pass",
+            "Result": {
+                "status": "Marketplace data collection complete"
+            },
+            "ResultPath": "$.marketplace_status",
+            "Next": "ResolvePipelineStatus"
+        },
+        "End_NoMarketplaceSelected": {
+            "Type": "Pass",
+            "Result": {
+                "status": "No marketplace modules were enabled"
+            },
+            "ResultPath": "$.marketplace_status",
+            "Next": "ResolvePipelineStatus"
+        },
+        "ResolvePipelineStatus": {
+            "Type": "Task",
+            "Resource": "arn:aws:lambda:eu-north-1:894037914878:function:resolve_pipeline_status",
+            "ResultPath": "$.pipeline_summary",
+            "End": true
+        }
+    }
+}

@@ -47,5 +47,5 @@ data/presets.json
 
 # Application logs (date-stamped & PM2 logs) - keep folder, ignore log files
 logs/*.log
-aws_functions
+aws_functions/venv
 .vscode

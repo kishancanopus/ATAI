@@ -1611,6 +1611,7 @@ const Dashboard = () => {
       const reviews = Number(amzMatch?.reviews_count ?? 0);
       const rating = Number(amzMatch?.rating ?? 0);
       const bestsellerRank = amzMatch?.bestseller_rank ?? '-';
+      const estimatedLocalPrice = amzMatch?.["estimated_local_price (fcl)"] ?? amzMatch?.estimated_local_price ?? null;
 
       // ── Alibaba fields (from fuzzy-matched Alibaba row)
       const aliTitle = aliMatch?.title ?? '-';
@@ -1659,6 +1660,7 @@ const Dashboard = () => {
         reviews_count: reviews || null,
         rating: rating || null,
         bestseller_rank: bestsellerRank,
+        estimated_local_price: estimatedLocalPrice !== null && estimatedLocalPrice !== '-' ? Number(estimatedLocalPrice) : null,
         // Alibaba
         alibaba_title: aliTitle,
         alibaba_price_min_usd: aliMatch?.alibaba_price_min_usd ? Number(aliMatch.alibaba_price_min_usd) : null,
@@ -3814,7 +3816,7 @@ const Dashboard = () => {
                         <th className="px-3 py-1 text-center border-r border-white/10">#</th>
                         <th colSpan={4} className="px-3 py-1 text-center border-r border-white/10">📋 Keyword Planner</th>
                         <th colSpan={4} className="px-3 py-1 text-center border-r border-white/10">📈 Google Trends</th>
-                        <th colSpan={5} className="px-3 py-1 text-center border-r border-white/10">🛒 Amazon</th>
+                        <th colSpan={6} className="px-3 py-1 text-center border-r border-white/10">🛒 Amazon</th>
                         <th colSpan={4} className="px-3 py-1 text-center border-r border-white/10">🏭 Alibaba</th>
                         <th colSpan={6} className="px-3 py-1 text-center">🏆 Scores</th>
                       </tr>
@@ -3833,7 +3835,8 @@ const Dashboard = () => {
                         <th className="px-3 py-2 font-bold whitespace-nowrap text-xs uppercase">Price (USD)</th>
                         <th className="px-3 py-2 font-bold whitespace-nowrap text-xs uppercase">Reviews</th>
                         <th className="px-3 py-2 font-bold whitespace-nowrap text-xs uppercase">Rating</th>
-                        <th className="px-3 py-2 font-bold whitespace-nowrap text-xs uppercase border-r border-black/20">BSR</th>
+                        <th className="px-3 py-2 font-bold whitespace-nowrap text-xs uppercase">BSR</th>
+                        <th className="px-3 py-2 font-bold whitespace-nowrap text-xs uppercase border-r border-black/20">Est. Local Price (FCL)</th>
                         <th className="px-3 py-2 font-bold whitespace-nowrap text-xs uppercase">Supplier Product</th>
                         <th className="px-3 py-2 font-bold whitespace-nowrap text-xs uppercase">MOQ</th>
                         <th className="px-3 py-2 font-bold whitespace-nowrap text-xs uppercase">Sup. Rating</th>
@@ -3904,7 +3907,8 @@ const Dashboard = () => {
                             <td className="px-3 py-2 text-gray-100 whitespace-nowrap">{fmtNum(row.amazon_price_usd, '$', '', 2)}</td>
                             <td className="px-3 py-2 text-gray-100 whitespace-nowrap">{row.reviews_count ? Number(row.reviews_count).toLocaleString() : '-'}</td>
                             <td className="px-3 py-2 text-gray-100 whitespace-nowrap">{fmtNum(row.rating, '', '★', 1)}</td>
-                            <td className="px-3 py-2 text-gray-100 whitespace-nowrap border-r border-white/10">{str(row.bestseller_rank)}</td>
+                            <td className="px-3 py-2 text-gray-100 whitespace-nowrap">{str(row.bestseller_rank)}</td>
+                            <td className="px-3 py-2 text-gray-100 whitespace-nowrap border-r border-white/10">{fmtNum(row.estimated_local_price, '$', '', 2)}</td>
                             {/* Alibaba */}
                             <td className="px-3 py-2 text-gray-200 max-w-[180px] truncate" title={row.alibaba_title}>
                               {row.product_link || row.alibaba_product_id ? (
