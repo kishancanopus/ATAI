@@ -128,7 +128,10 @@ async function buildInputAndStartExecution(
     const fcl_max = filters.fcl_max != null ? Number(filters.fcl_max) : 999999;
 
     const margin_min = filters.margin_min != null ? Number(filters.margin_min) : 0;
-    const moq_max = ensureInt(filters.moq_max, 999999);
+    const moq_max =
+      filters.moq_max != null && Number(filters.moq_max) > 0
+        ? ensureInt(filters.moq_max, 0)
+        : 0;
     const supplier_rating_min = filters.supplier_rating_min != null ? Number(filters.supplier_rating_min) : 0;
     const verified_supplier = !!filters.verified_supplier;
 

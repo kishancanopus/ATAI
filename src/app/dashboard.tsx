@@ -3,7 +3,13 @@
 import React, { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import * as XLSX from 'xlsx';
 import { fetchProducts, Product } from '@/lib/productsService';
-import { getAmazonRowAsin, matchAmazonForKwpKeyword } from '@/lib/amazonKwpMatch';
+import {
+  formatAmazonMatchType,
+  matchAmazonForKwpSeedsBatch,
+} from '@/lib/amazonKwpMatch';
+import { matchAlibabaForKwpKeyword, groupAlibabaByRoot } from '@/lib/alibabaKwpMatch';
+import { matchTrendForKwpKeyword, groupTrendsByRoot } from '@/lib/trendsKwpMatch';
+import { computeEstimatedLocalPrice } from '@/lib/fcl';
 import {
   formatPipelineStageMessage,
   getPipelineUserMessage,
@@ -329,11 +335,18 @@ const Dashboard = () => {
   const [hasPerformedSearch, setHasPerformedSearch] = useState(false);
   const [consolidatedResults, setConsolidatedResults] = useState<any[]>([]);
 
-  /** Rows shown in consolidated table — always re-filtered when GT score slider changes */
+  /** Rows shown in consolidated table — GT filter + FCL recalc when slider changes */
   const displayedConsolidatedResults = useMemo(() => {
     const filtered = filterConsolidatedByGoogleTrendScore(consolidatedResults, googleTrendScore);
-    return filtered.map((row, i) => ({ ...row, rank: i + 1 }));
-  }, [consolidatedResults, googleTrendScore]);
+    return filtered.map((row, i) => ({
+      ...row,
+      rank: i + 1,
+      estimated_local_price: computeEstimatedLocalPrice(
+        Number(row.amazon_price_usd ?? 0),
+        fcl
+      ),
+    }));
+  }, [consolidatedResults, googleTrendScore, fcl]);
   const [categoryExecutions, setCategoryExecutions] = useState<CategoryExecution[]>([]);
   const categoryExecutionsRef = useRef(categoryExecutions);
   const categoryBatchStartedAtRef = useRef(0);
@@ -1448,25 +1461,24 @@ const Dashboard = () => {
       return m;
     };
     const amzByExecKw = groupMarketplaceByRoot(amzRows);
-    const aliByExecKw = groupMarketplaceByRoot(aliRows);
+    const aliByExecKw = groupAlibabaByRoot(aliRows, kwpRootKeys);
+    const trendsByRoot = groupTrendsByRoot(trendRows, kwpRootKeys);
 
     const seedKey = (row: any) =>
       `${(row.root_keyword ?? row.keyword ?? '').toString().toLowerCase().trim()}::${(row.keyword ?? row.sub_keyword ?? row.root_keyword ?? '').toString().toLowerCase().trim()}`;
 
-    const usedAsins = new Set<string>();
     const amzMatchBySeed = new Map<string, any | null>();
-    const seedsByVolume = [...seedRows].sort(
-      (a, b) =>
-        Number(b.avg_monthly_searches ?? 0) - Number(a.avg_monthly_searches ?? 0)
-    );
-    for (const row of seedsByVolume) {
-      const kw = (row.keyword ?? row.sub_keyword ?? row.root_keyword ?? '').toString();
-      const rootKw = (row.root_keyword ?? row.keyword ?? '').toString().toLowerCase().trim();
-      const scopedAmz = amzByExecKw.get(rootKw) ?? [];
-      const amzMatch = matchAmazonForKwpKeyword(kw, amzRows, scopedAmz, usedAsins);
-      amzMatchBySeed.set(seedKey(row), amzMatch);
-      const asin = amzMatch ? getAmazonRowAsin(amzMatch) : null;
-      if (asin) usedAsins.add(asin);
+    const amzMatchTypeBySeed = new Map<string, string>();
+    const batchSeeds = seedRows.map((row) => ({
+      key: seedKey(row),
+      keyword: (row.keyword ?? row.sub_keyword ?? row.root_keyword ?? '').toString(),
+      rootKeyword: (row.root_keyword ?? row.keyword ?? '').toString(),
+      searchVolume: Number(row.avg_monthly_searches ?? 0),
+    }));
+    const batchMatches = matchAmazonForKwpSeedsBatch(batchSeeds, amzRows, amzByExecKw);
+    for (const [key, result] of batchMatches) {
+      amzMatchBySeed.set(key, result?.row ?? null);
+      amzMatchTypeBySeed.set(key, result?.matchType ?? 'none');
     }
 
     // ── Fuzzy join helper ─────────────────────────────────────────────────
@@ -1545,11 +1557,17 @@ const Dashboard = () => {
       const kw = (row.keyword ?? row.sub_keyword ?? row.root_keyword ?? '').toString();
       const rootKw = (row.root_keyword ?? row.keyword ?? '').toString().toLowerCase().trim();
       const scopedAli = aliByExecKw.get(rootKw) ?? [];
+      const scopedTrends = trendsByRoot.get(rootKw) ?? [];
 
       const kwpMatch = matchFuzzy(kwpRows, kw, ['keyword', 'sub_keyword', 'root_keyword']);
-      const trendMatch = matchFuzzy(trendRows, kw, ['keyword']);
+      const trendMatch = matchTrendForKwpKeyword(kw, scopedTrends);
       const amzMatch = amzMatchBySeed.get(seedKey(row)) ?? null;
-      const aliMatch = matchFuzzy(aliRows, kw, ['keyword', 'search_category'], 'title', scopedAli);
+      const amzMatchType = amzMatchTypeBySeed.get(seedKey(row)) ?? 'none';
+      const aliMatch = matchAlibabaForKwpKeyword(
+        kw,
+        scopedAli,
+        amzMatch?.title ? String(amzMatch.title) : undefined
+      );
 
       const sv = Number(kwpMatch?.avg_monthly_searches ?? row.avg_monthly_searches ?? 0);
       const ta = Number(trendMatch?.gt_interest_avg ?? trendMatch?.interest_avg ?? 0);
@@ -1578,11 +1596,17 @@ const Dashboard = () => {
       const kw = (row.keyword ?? row.sub_keyword ?? row.root_keyword ?? '').toString();
       const rootKw = (row.root_keyword ?? row.keyword ?? '').toString().toLowerCase().trim();
       const scopedAli = aliByExecKw.get(rootKw) ?? [];
+      const scopedTrends = trendsByRoot.get(rootKw) ?? [];
 
       const kwpMatch = matchFuzzy(kwpRows, kw, ['keyword', 'sub_keyword', 'root_keyword']);
-      const trendMatch = matchFuzzy(trendRows, kw, ['keyword']);
+      const trendMatch = matchTrendForKwpKeyword(kw, scopedTrends);
       const amzMatch = amzMatchBySeed.get(seedKey(row)) ?? null;
-      const aliMatch = matchFuzzy(aliRows, kw, ['keyword', 'search_category'], 'title', scopedAli);
+      const amzMatchType = amzMatchTypeBySeed.get(seedKey(row)) ?? 'none';
+      const aliMatch = matchAlibabaForKwpKeyword(
+        kw,
+        scopedAli,
+        amzMatch?.title ? String(amzMatch.title) : undefined
+      );
 
       // ── KWP fields (from KWP seed row itself or kwpMatch)
       const avgMonthlySearches = Number(kwpMatch?.avg_monthly_searches ?? row.avg_monthly_searches ?? 0);
@@ -1611,7 +1635,7 @@ const Dashboard = () => {
       const reviews = Number(amzMatch?.reviews_count ?? 0);
       const rating = Number(amzMatch?.rating ?? 0);
       const bestsellerRank = amzMatch?.bestseller_rank ?? '-';
-      const estimatedLocalPrice = amzMatch?.["estimated_local_price (fcl)"] ?? amzMatch?.estimated_local_price ?? null;
+      const estimatedLocalPrice = computeEstimatedLocalPrice(amazonPrice, fcl);
 
       // ── Alibaba fields (from fuzzy-matched Alibaba row)
       const aliTitle = aliMatch?.title ?? '-';
@@ -1655,12 +1679,14 @@ const Dashboard = () => {
         gt_interest_change_pct: gtInterestChangePct,
         // Amazon
         amazon_title: amazonTitle,
+        amazon_match_type: amzMatchType,
+        amazon_match_label: formatAmazonMatchType(amzMatchType as any),
         asin,
         amazon_price_usd: amazonPrice || null,
         reviews_count: reviews || null,
         rating: rating || null,
         bestseller_rank: bestsellerRank,
-        estimated_local_price: estimatedLocalPrice !== null && estimatedLocalPrice !== '-' ? Number(estimatedLocalPrice) : null,
+        estimated_local_price: estimatedLocalPrice,
         // Alibaba
         alibaba_title: aliTitle,
         alibaba_price_min_usd: aliMatch?.alibaba_price_min_usd ? Number(aliMatch.alibaba_price_min_usd) : null,
@@ -1688,7 +1714,7 @@ const Dashboard = () => {
     ).map((row, i) => ({ rank: i + 1, ...row }));
 
     setConsolidatedResults(ranked);
-  }, [amazonResults, alibabaResults, keywordPlannerResults, trendsResults, googleTrendScore]);
+  }, [amazonResults, alibabaResults, keywordPlannerResults, trendsResults, googleTrendScore, fcl]);
 
   // Apply UI filters to the consolidated list dynamically.
   // Consolidated table uses displayedConsolidatedResults (GT threshold applied at build + render).
@@ -1734,9 +1760,19 @@ const Dashboard = () => {
 
             return {
               kwp: kwpData?.success && kwpData?.available ? (kwpData.results || []) : [],
-              trends: trendsData?.success && trendsData?.available ? (trendsData.results || []) : [],
+              trends: trendsData?.success && trendsData?.available
+                ? (trendsData.results || []).map((r: any) => ({
+                    ...r,
+                    root_keyword: exec.keyword,
+                  }))
+                : [],
               amz: amzData?.success && amzData?.available ? (amzData.results || []) : [],
-              ali: aliData?.success && aliData?.available ? (aliData.results || []) : [],
+              ali: aliData?.success && aliData?.available
+                ? (aliData.results || []).map((r: any) => ({
+                    ...r,
+                    root_keyword: exec.keyword,
+                  }))
+                : [],
             };
           });
 
@@ -3816,7 +3852,7 @@ const Dashboard = () => {
                         <th className="px-3 py-1 text-center border-r border-white/10">#</th>
                         <th colSpan={4} className="px-3 py-1 text-center border-r border-white/10">📋 Keyword Planner</th>
                         <th colSpan={4} className="px-3 py-1 text-center border-r border-white/10">📈 Google Trends</th>
-                        <th colSpan={6} className="px-3 py-1 text-center border-r border-white/10">🛒 Amazon</th>
+                        <th colSpan={7} className="px-3 py-1 text-center border-r border-white/10">🛒 Amazon</th>
                         <th colSpan={4} className="px-3 py-1 text-center border-r border-white/10">🏭 Alibaba</th>
                         <th colSpan={6} className="px-3 py-1 text-center">🏆 Scores</th>
                       </tr>
@@ -3832,11 +3868,12 @@ const Dashboard = () => {
                         <th className="px-3 py-2 font-bold whitespace-nowrap text-xs uppercase">GT Direction</th>
                         <th className="px-3 py-2 font-bold whitespace-nowrap text-xs uppercase border-r border-black/20">GT Change %</th>
                         <th className="px-3 py-2 font-bold whitespace-nowrap text-xs uppercase">Product Title</th>
+                        <th className="px-3 py-2 font-bold whitespace-nowrap text-xs uppercase">Match</th>
                         <th className="px-3 py-2 font-bold whitespace-nowrap text-xs uppercase">Price (USD)</th>
                         <th className="px-3 py-2 font-bold whitespace-nowrap text-xs uppercase">Reviews</th>
                         <th className="px-3 py-2 font-bold whitespace-nowrap text-xs uppercase">Rating</th>
                         <th className="px-3 py-2 font-bold whitespace-nowrap text-xs uppercase">BSR</th>
-                        <th className="px-3 py-2 font-bold whitespace-nowrap text-xs uppercase border-r border-black/20">Est. Local Price (FCL)</th>
+                        <th className="px-3 py-2 font-bold whitespace-nowrap text-xs uppercase text-center border-r border-black/20">Est. Local Price (FCL)</th>
                         <th className="px-3 py-2 font-bold whitespace-nowrap text-xs uppercase">Supplier Product</th>
                         <th className="px-3 py-2 font-bold whitespace-nowrap text-xs uppercase">MOQ</th>
                         <th className="px-3 py-2 font-bold whitespace-nowrap text-xs uppercase">Sup. Rating</th>
@@ -3904,11 +3941,22 @@ const Dashboard = () => {
                                 str(row.amazon_title)
                               )}
                             </td>
+                            <td className="px-3 py-2 text-gray-300 whitespace-nowrap text-[11px]" title={str(row.amazon_match_label)}>
+                              {row.amazon_match_type && row.amazon_match_type !== 'none' ? (
+                                <span className={
+                                  row.amazon_match_type === 'fallback' || row.amazon_match_type === 'partial_title'
+                                    ? 'text-yellow-300'
+                                    : 'text-green-300'
+                                }>
+                                  {str(row.amazon_match_label)}
+                                </span>
+                              ) : '-'}
+                            </td>
                             <td className="px-3 py-2 text-gray-100 whitespace-nowrap">{fmtNum(row.amazon_price_usd, '$', '', 2)}</td>
                             <td className="px-3 py-2 text-gray-100 whitespace-nowrap">{row.reviews_count ? Number(row.reviews_count).toLocaleString() : '-'}</td>
                             <td className="px-3 py-2 text-gray-100 whitespace-nowrap">{fmtNum(row.rating, '', '★', 1)}</td>
                             <td className="px-3 py-2 text-gray-100 whitespace-nowrap">{str(row.bestseller_rank)}</td>
-                            <td className="px-3 py-2 text-gray-100 whitespace-nowrap border-r border-white/10">{fmtNum(row.estimated_local_price, '$', '', 2)}</td>
+                            <td className="px-3 py-2 text-gray-100 whitespace-nowrap text-center border-r border-white/10">{fmtNum(row.estimated_local_price, '$', '', 2)}</td>
                             {/* Alibaba */}
                             <td className="px-3 py-2 text-gray-200 max-w-[180px] truncate" title={row.alibaba_title}>
                               {row.product_link || row.alibaba_product_id ? (
