@@ -53,7 +53,7 @@ def lambda_handler(event, context):
                 "keywords_processed": 0
             }
 
-        # Compute avg price per keyword
+        # Keyword-level average (reference / analytics)
         avg_price_df = (
             df.groupby("keyword")["amazon_price_usd"]
             .mean()
@@ -61,13 +61,10 @@ def lambda_handler(event, context):
             .rename(columns={"amazon_price_usd": "avg_amazon_price_by_keyword"})
         )
 
-        # Apply FCL
-        avg_price_df["estimated_local_price (fcl)"] = avg_price_df[
-            "avg_amazon_price_by_keyword"
-        ] * (1 - fcl_percentage)
-
-        # Merge back to product-level dataframe
         df = df.merge(avg_price_df, on="keyword", how="left")
+
+        # Per-product FCL: apply slider % to each row's Amazon price (consolidated table)
+        df["estimated_local_price (fcl)"] = df["amazon_price_usd"] * (1 - fcl_percentage)
 
         # Overwrite parquet
         table = pa.Table.from_pandas(df)

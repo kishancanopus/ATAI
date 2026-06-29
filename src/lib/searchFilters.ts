@@ -5,7 +5,7 @@ export const MAX_VARIANT_LIMIT = 30;
 /** UI `0` means “use the maximum allowed variant count” (30). */
 export function resolveVariantLimitMax(val: string | number | undefined | null): number {
   const trimmed = String(val ?? '').trim();
-  if (trimmed === '0' || val === 0) return MAX_VARIANT_LIMIT;
+  if (trimmed === '0' || val === 0) return 0;
   const n = typeof val === 'number' ? Math.floor(val) : parseInt(trimmed, 10);
   if (!Number.isFinite(n) || n <= 0) return DEFAULT_VARIANT_LIMIT;
   return Math.min(n, MAX_VARIANT_LIMIT);

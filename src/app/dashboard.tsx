@@ -335,6 +335,22 @@ const Dashboard = () => {
   const [hasPerformedSearch, setHasPerformedSearch] = useState(false);
   const [consolidatedResults, setConsolidatedResults] = useState<any[]>([]);
 
+  // ── Batch processing state (variant limit = 0 / unlimited mode) ──────────
+  /** All keywords returned from the planner when variant limit is 0 */
+  const [allPlannerKeywords, setAllPlannerKeywords] = useState<string[]>([]);
+  /** How many keywords from allPlannerKeywords have already been dispatched */
+  const [batchProcessedCount, setBatchProcessedCount] = useState<number>(0);
+  /** Whether the "process next batch" action is in progress */
+  const [nextBatchProcessing, setNextBatchProcessing] = useState(false);
+  /** Payload used for the last search — needed to re-trigger next batch */
+  const lastBatchPayloadRef = useRef<Record<string, any> | null>(null);
+  /** Ref-mirror of allPlannerKeywords so closures (aggregateCategoryData effect) can read it without stale captures */
+  const allPlannerKeywordsRef = useRef<string[]>([]);
+  /** Snapshot of consolidated rows accumulated across batches — used to merge into next batch without stale closure */
+  const batchConsolidatedSnapshotRef = useRef<any[]>([]);
+  // ─────────────────────────────────────────────────────────────────────────
+
+
   /** Rows shown in consolidated table — GT filter + FCL recalc when slider changes */
   const displayedConsolidatedResults = useMemo(() => {
     const filtered = filterConsolidatedByGoogleTrendScore(consolidatedResults, googleTrendScore);
@@ -347,6 +363,15 @@ const Dashboard = () => {
       ),
     }));
   }, [consolidatedResults, googleTrendScore, fcl]);
+
+  // Keep ref in sync so closures in aggregateCategoryData always see the latest list.
+  useEffect(() => {
+    allPlannerKeywordsRef.current = allPlannerKeywords;
+    if (allPlannerKeywords.length === 0) {
+      batchConsolidatedSnapshotRef.current = [];
+    }
+  }, [allPlannerKeywords]);
+
   const [categoryExecutions, setCategoryExecutions] = useState<CategoryExecution[]>([]);
   const categoryExecutionsRef = useRef(categoryExecutions);
   const categoryBatchStartedAtRef = useRef(0);
@@ -1342,7 +1367,15 @@ const Dashboard = () => {
     setVariantLimitMaxError('');
     setResultsCapError('');
     setTrendPeriodError('');
+
+    // Reset batch state
+    setAllPlannerKeywords([]);
+    setBatchProcessedCount(0);
+    setNextBatchProcessing(false);
+    lastBatchPayloadRef.current = null;
+    batchConsolidatedSnapshotRef.current = [];
   }, []);
+
 
 
   // Pipeline workflow functions
@@ -1723,7 +1756,7 @@ const Dashboard = () => {
   useEffect(() => {
     if (pipelineStatus === 'IDLE' || pipelineStatus === 'STARTING') return;
 
-    if (searchingMode === 'CATEGORY BASED' && categoryExecutions.length > 0) {
+    if (searchingMode === 'CATEGORY BASED' && categoryExecutionsRef.current.length > 0) {
       // Always aggregate ALL succeeded variants' data into one consolidated table
       // (regardless of which variant is selected in the dropdown — the dropdown
       //  only filters the per-stage detail panels below the table)
@@ -1733,7 +1766,7 @@ const Dashboard = () => {
       let isCancelled = false;
       const aggregateCategoryData = async () => {
         try {
-          const fetchPromises = categoryExecutions.map(async (exec) => {
+          const fetchPromises = categoryExecutionsRef.current.map(async (exec) => {
             const arn = exec.execution_arn;
             const pipelineHealth = getCategoryExecutionPipelineStatus(exec);
             const includeData =
@@ -1785,8 +1818,45 @@ const Dashboard = () => {
           const megaAmz = results.flatMap(r => r.amz);
           const megaAli = results.flatMap(r => r.ali);
 
-          buildConsolidated(megaKwp, megaTrends, megaAmz, megaAli);
+          if (allPlannerKeywordsRef.current.length > 0) {
+            // ── Unlimited / batch mode: accumulate across batches ──────────────
+            // 1) Snapshot the previous batches' consolidated rows before the new
+            //    build replaces them.
+            const previousRows: any[] = batchConsolidatedSnapshotRef.current;
+
+            // 2) Build new batch rows (this internally calls setConsolidatedResults).
+            buildConsolidated(megaKwp, megaTrends, megaAmz, megaAli);
+
+            // 3) Immediately after, merge previous + new (functional update form
+            //    so we get the just-set new values from buildConsolidated).
+            setConsolidatedResults(newBatchRows => {
+              const merged = new Map<string, any>();
+              // Previous batches (lower priority — keeps existing data if keyword absent in new batch)
+              previousRows.forEach(row => {
+                const k = (row.keyword ?? row.sub_keyword ?? '').toString().toLowerCase().trim();
+                merged.set(k, row);
+              });
+              // New batch (higher priority — overwrites same keyword with fresh data)
+              newBatchRows.forEach(row => {
+                const k = (row.keyword ?? row.sub_keyword ?? '').toString().toLowerCase().trim();
+                merged.set(k, row);
+              });
+              const reRanked = [...merged.values()]
+                .sort((a, b) => b.final_score - a.final_score)
+                .map((row, i) => ({ ...row, rank: i + 1 }));
+              // Update snapshot for the NEXT batch
+              batchConsolidatedSnapshotRef.current = reRanked;
+              return reRanked;
+            });
+            // ──────────────────────────────────────────────────────────────────
+          } else {
+            // Normal single-batch or fixed-limit mode: just replace.
+            batchConsolidatedSnapshotRef.current = [];
+            buildConsolidated(megaKwp, megaTrends, megaAmz, megaAli);
+          }
           setStatusMessage('Category Pipeline completed! View stage data below.');
+
+
         } catch (e) {
           console.error('Error aggregating category data', e);
         }
@@ -1794,10 +1864,18 @@ const Dashboard = () => {
 
       aggregateCategoryData();
       return () => { isCancelled = true; };
-    } else if (searchingMode !== 'CATEGORY BASED') {
-      // Manual / ATAI AUTO: use the single-run data that was loaded via stage polling
-      buildConsolidated();
     }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [pipelineStatus]);
+  // ── MANUAL / ATAI AUTO: re-consolidate when stage results arrive ──────────
+  // This is intentionally a SEPARATE effect from the CATEGORY BASED one above.
+  // Keeping them merged caused a bug: selecting a variant (which writes
+  // keywordPlannerResults / trendsResults) re-triggered the full category
+  // aggregation and fired GET requests for every execution.
+  useEffect(() => {
+    if (pipelineStatus === 'IDLE' || pipelineStatus === 'STARTING') return;
+    if (searchingMode === 'CATEGORY BASED') return; // handled above
+    buildConsolidated();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [pipelineStatus, keywordPlannerResults, trendsResults, amazonResults, alibabaResults]);
   // ────────────────────────────────────────────────────────────────────────────
@@ -1870,7 +1948,141 @@ const Dashboard = () => {
     setIsPreliminary(false);
   };
 
+  // ── handleNextBatch ──────────────────────────────────────────────────────
+  // Called when user clicks "Process Next 30 Batch".
+  // Picks the next slice of 30 from allPlannerKeywords, appends them to
+  // categoryExecutions (so consolidated table keeps growing), and kicks off
+  // the same sequential trigger queue used by the initial batch.
+  const handleNextBatch = useCallback(async () => {
+    if (nextBatchProcessing || allPlannerKeywords.length === 0) return;
+    const remaining = allPlannerKeywords.slice(batchProcessedCount);
+    if (remaining.length === 0) return;
+
+    const BATCH_SIZE = 30;
+    const nextBatch = remaining.slice(0, BATCH_SIZE);
+    const newProcessedCount = batchProcessedCount + nextBatch.length;
+
+    setNextBatchProcessing(true);
+    setBatchProcessedCount(newProcessedCount);
+    cancelTokenRef.current = false;
+
+    // Append new PENDING entries to categoryExecutions (do NOT clear existing ones)
+    const newExecutions = nextBatch.map(kw => ({
+      keyword: kw,
+      run_id: '',
+      execution_arn: '',
+      status: 'PENDING',
+      started_at: null
+    }));
+    setCategoryExecutionsMerged(prev => [...prev, ...newExecutions]);
+
+    // Update preview list too
+    setCategoryKeywordsPreview(prev => [...(prev ?? []), ...nextBatch]);
+
+    // Reuse virtual ARN so the polling effect stays alive
+    setExecutionArn(`category_search:frontend_managed:${Date.now()}`);
+    setPipelineStatus('POLLING');
+    setIsBatching(true);
+    setStatusMessage('STARTING NEXT BATCH...');
+
+    const payload = lastBatchPayloadRef.current;
+    if (!payload) {
+      setNextBatchProcessing(false);
+      return;
+    }
+
+    (async () => {
+      const sleep = (ms: number) => new Promise((res) => setTimeout(res, ms));
+      const TRIGGER_INTERVAL_MS = 5000;
+      const MAX_CONCURRENT = 5;
+      let lastTriggerTime = 0;
+
+      const updateCategoryExecByKeyword = (keyword: string, patch: Partial<CategoryExecution>) => {
+        const key = categoryKeywordKey(keyword);
+        setCategoryExecutionsMerged((current) =>
+          current.map((exec) =>
+            categoryKeywordKey(exec.keyword) === key
+              ? mergeCategoryExecutionRow(exec, { keyword: exec.keyword, ...patch })
+              : exec
+          )
+        );
+      };
+
+      const refreshRunningCategoryStatuses = async () => {
+        const polled = await pollCategoryExecutionsFromAws(categoryExecutionsRef.current);
+        setCategoryExecutionsMerged((current) => applyCategoryExecutionUpdates(current, polled));
+      };
+
+      const triggerCategoryChild = async (kw: string): Promise<void> => {
+        updateCategoryExecByKeyword(kw, { status: 'STARTING', started_at: Date.now() });
+        setStatusMessage(`TRIGGERING: ${kw}`);
+        try {
+          const triggerPayload = { ...payload, keyword: kw, search_mode: 'category_child' };
+          const triggerRes = await fetch('/api/pipeline/trigger', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(triggerPayload),
+          });
+          const triggerData = await triggerRes.json();
+          const arn = triggerData.executionArn || triggerData.execution_arn;
+          if (triggerRes.ok && arn && triggerData.success !== false) {
+            updateCategoryExecByKeyword(kw, {
+              status: 'RUNNING',
+              execution_arn: arn,
+              run_id: triggerData.executionName || String(arn).split(':').pop() || '',
+            });
+          } else {
+            updateCategoryExecByKeyword(kw, { status: 'FAILED', pipeline_summary: null, pipeline_status: null });
+          }
+        } catch (e) {
+          console.error(`Failed to trigger next-batch child for ${kw}:`, e);
+          updateCategoryExecByKeyword(kw, { status: 'FAILED', pipeline_summary: null, pipeline_status: null });
+        }
+        lastTriggerTime = Date.now();
+      };
+
+      const pendingQueue = [...nextBatch];
+      while (pendingQueue.length > 0 && !cancelTokenRef.current) {
+        await refreshRunningCategoryStatuses();
+        const runningCount = countInFlightCategoryExecutions(categoryExecutionsRef.current);
+        const now = Date.now();
+        const elapsedSinceTrigger = now - lastTriggerTime;
+        const slotAvailable = runningCount < MAX_CONCURRENT;
+        const intervalElapsed = lastTriggerTime === 0 || elapsedSinceTrigger >= TRIGGER_INTERVAL_MS;
+
+        if (slotAvailable && intervalElapsed) {
+          const kw = pendingQueue.shift()!;
+          await triggerCategoryChild(kw);
+          await refreshRunningCategoryStatuses();
+          continue;
+        }
+
+        if (!slotAvailable) {
+          setStatusMessage(`BATCH FULL (${runningCount}/${MAX_CONCURRENT}). Waiting for a variant to finish...`);
+        } else {
+          const waitSec = Math.max(1, Math.ceil((TRIGGER_INTERVAL_MS - elapsedSinceTrigger) / 1000));
+          setStatusMessage(`WAITING ${waitSec}s before next trigger...`);
+        }
+        await sleep(1000);
+      }
+
+      if (!cancelTokenRef.current) {
+        setIsBatching(false);
+        setStatusMessage('RUNNING');
+      }
+      setNextBatchProcessing(false);
+    })();
+  }, [
+    nextBatchProcessing,
+    allPlannerKeywords,
+    batchProcessedCount,
+    pollCategoryExecutionsFromAws,
+    setCategoryExecutionsMerged,
+  ]);
+  // ────────────────────────────────────────────────────────────────────────────
+
   const getApiParams = useCallback(() => {
+
     // Decide which keyword filter to send to the backend.
     // - MANUAL / ATAI AUTO: use keywordSearch.
     // - CATEGORY BASED: use selectedCategoryVariant when a specific variant is chosen.
@@ -1984,8 +2196,8 @@ const Dashboard = () => {
         if (isNaN(vMax)) {
           setVariantLimitMaxError('Must be a number');
           hasErrors = true;
-        } else if (vMax > 30) {
-          setVariantLimitMaxError('Limit max to 30 to prevent Google Trends rate limiting');
+        } else if (vMax !== 0 && vMax > 30) {
+          setVariantLimitMaxError('Limit max to 30. Use 0 for unlimited (batched in groups of 30)');
           hasErrors = true;
         }
       }
@@ -2095,13 +2307,15 @@ const Dashboard = () => {
           // Frontend-driven category search orchestration
           setStatusMessage('GENERATING KEYWORDS...');
 
+          const isUnlimited = variantLimitMax.trim() === '0';
+
           const kwResponse = await fetch('/api/pipeline/generate-keywords', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
               category: searchCategory,
               geo: searchLocation,
-              limit: resolveVariantLimitMax(variantLimitMax),
+              limit: isUnlimited ? 0 : resolveVariantLimitMax(variantLimitMax),
               search_volume_min: kwpMinSearches ? parseInt(kwpMinSearches) : undefined,
               search_volume_max: kwpMaxSearches ? parseInt(kwpMaxSearches) : undefined,
               blacklist: blacklistedWords.length > 0 ? blacklistedWords : []
@@ -2114,11 +2328,28 @@ const Dashboard = () => {
           }
 
           const kwData = await kwResponse.json();
-          const generatedKeywords: string[] = kwData.keywords || [];
+          const allGeneratedKeywords: string[] = kwData.keywords || [];
+
+          // ── Unlimited mode: store full list, only process first 30 now ──
+          const BATCH_SIZE = 30;
+          let generatedKeywords: string[];
+          if (isUnlimited && allGeneratedKeywords.length > BATCH_SIZE) {
+            // Store the full list so the Next Batch button can access remaining keywords
+            setAllPlannerKeywords(allGeneratedKeywords);
+            setBatchProcessedCount(BATCH_SIZE);
+            lastBatchPayloadRef.current = payload;
+            generatedKeywords = allGeneratedKeywords.slice(0, BATCH_SIZE);
+          } else {
+            // Normal mode or all keywords fit in one batch
+            setAllPlannerKeywords([]);
+            setBatchProcessedCount(0);
+            lastBatchPayloadRef.current = null;
+            generatedKeywords = allGeneratedKeywords;
+          }
 
           categoryBatchStartedAtRef.current = Date.now();
 
-          // Initialize UI with PENDING statuses
+          // Initialize UI with PENDING statuses (only for current batch)
           const initialExecutions = generatedKeywords.map(kw => ({
             keyword: kw,
             run_id: '',
@@ -3040,6 +3271,7 @@ const Dashboard = () => {
                         VARIANT LIMIT MAX <span className="text-[#F3940B] ml-0.5">*</span>
                         {pipelineFieldsDisabled && <InfoButton message="Please reset in order to apply filters for new search" />}
                       </label>
+                      <p className="text-[10px] text-gray-500 mb-1">1–30 keywords per run · Enter <strong className="text-[#C0FE72]">0</strong> to fetch all &amp; process in batches of 30</p>
                       <input
                         type="text"
                         value={variantLimitMax}
@@ -3053,8 +3285,8 @@ const Dashboard = () => {
                             const parsed = parseInt(val.trim(), 10);
                             if (isNaN(parsed)) {
                               setVariantLimitMaxError('Must be a number');
-                            } else if (parsed > 30) {
-                              setVariantLimitMaxError('Limit max to 30 to prevent Google Trends rate limiting');
+                            } else if (parsed !== 0 && parsed > 30) {
+                              setVariantLimitMaxError('Limit max to 30. Use 0 for unlimited (batched in groups of 30)');
                             } else if (variantLimitMaxError) {
                               setVariantLimitMaxError('');
                             }
@@ -4016,8 +4248,79 @@ const Dashboard = () => {
                   <div ref={stickyScrollContentRef} style={{ height: '1px' }} />
                 </div>
 
+                {/* ── NEXT BATCH BUTTON — unlimited mode (variant limit = 0) ── */}
+                {pipelineStatus === 'COMPLETED' &&
+                  !isActiveRun &&
+                  allPlannerKeywords.length > 0 &&
+                  batchProcessedCount < allPlannerKeywords.length && (
+                  <div className="mt-6 p-5 rounded-2xl bg-gradient-to-br from-[#1a2318]/80 to-[#243022]/80 border border-[#C0FE72]/30 backdrop-blur-sm shadow-xl">
+                    <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
+                      <div>
+                        <h3 className="text-base font-bold text-[#C0FE72] tracking-wide flex items-center gap-2">
+                          <svg className="w-4 h-4" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24">
+                            <path strokeLinecap="round" strokeLinejoin="round" d="M9 5l7 7-7 7" />
+                          </svg>
+                          MORE KEYWORDS AVAILABLE
+                        </h3>
+                        <p className="text-xs text-gray-400 mt-1">
+                          Processed{' '}
+                          <strong className="text-gray-200">{batchProcessedCount}</strong>
+                          {' '}of{' '}
+                          <strong className="text-[#C0FE72]">{allPlannerKeywords.length}</strong>
+                          {' '}fetched keywords &mdash;{' '}
+                          <strong className="text-gray-200">
+                            {allPlannerKeywords.length - batchProcessedCount}
+                          </strong>
+                          {' '}remaining. Consolidated table will grow with each batch.
+                        </p>
+                      </div>
+                      <button
+                        id="next-batch-btn"
+                        onClick={handleNextBatch}
+                        disabled={nextBatchProcessing}
+                        className={`flex-shrink-0 flex items-center gap-2.5 px-6 py-3 rounded-xl font-bold text-sm tracking-wide transition-all shadow-lg ${
+                          nextBatchProcessing
+                            ? 'bg-gray-700/60 text-gray-400 cursor-not-allowed border border-white/10'
+                            : 'bg-[#C0FE72] text-black hover:bg-[#d4ff8c] active:scale-95 shadow-[#C0FE72]/20'
+                        }`}
+                      >
+                        {nextBatchProcessing ? (
+                          <>
+                            <svg className="w-4 h-4 animate-spin" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24">
+                              <path strokeLinecap="round" strokeLinejoin="round" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
+                            </svg>
+                            PROCESSING...
+                          </>
+                        ) : (
+                          <>
+                            <svg className="w-4 h-4" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24">
+                              <path strokeLinecap="round" strokeLinejoin="round" d="M13 5l7 7-7 7M5 5l7 7-7 7" />
+                            </svg>
+                            PROCESS NEXT {Math.min(30, allPlannerKeywords.length - batchProcessedCount)} KEYWORDS
+                          </>
+                        )}
+                      </button>
+                    </div>
+
+                    {/* Progress bar */}
+                    <div className="mt-4">
+                      <div className="flex items-center justify-between text-[10px] text-gray-500 mb-1">
+                        <span>Batch progress</span>
+                        <span>{Math.round((batchProcessedCount / allPlannerKeywords.length) * 100)}%</span>
+                      </div>
+                      <div className="w-full h-1.5 bg-white/10 rounded-full overflow-hidden">
+                        <div
+                          className="h-full bg-[#C0FE72] rounded-full transition-all duration-500"
+                          style={{ width: `${Math.round((batchProcessedCount / allPlannerKeywords.length) * 100)}%` }}
+                        />
+                      </div>
+                    </div>
+                  </div>
+                )}
+
               </div>
             )}
+
 
             {/* GT threshold removed every row from consolidated view */}
             {pipelineStatus === 'COMPLETED' &&

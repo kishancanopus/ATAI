@@ -200,7 +200,7 @@ export async function fetchKeywordsFromPlanner(
     const payload: Record<string, unknown> = {
         search_term: category,
         geo: (geo || "US").toUpperCase(),
-        limit,
+        limit: limit === 0 ? 1000 : limit,
         ...(minSearches != null && minSearches > 0 && { min_searches: minSearches }),
         ...(maxSearches != null && maxSearches > 0 && { max_searches: maxSearches }),
         ...(blacklisted_words.length > 0 && {
@@ -208,7 +208,7 @@ export async function fetchKeywordsFromPlanner(
         }),
     };
 
-    console.log("[category_keyword Lambda] Invoking for category=", category, "geo=", geo, "limit=", limit);
+    console.log("[category_keyword Lambda] Invoking for category=", category, "geo=", geo, "limit=", limit === 0 ? 1000 : limit);
 
     const command = new InvokeCommand({
         FunctionName: CATEGORY_KEYWORD_FUNCTION,
