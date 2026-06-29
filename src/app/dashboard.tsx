@@ -3220,45 +3220,41 @@ const Dashboard = () => {
                 )}
                 {/* Trend Period - only show when Active Search is ON */}
                 {activeSearch && (
-                  <div className="flex flex-col items-start gap-2 relative">
-                    <div className="flex items-center gap-4 flex-col">
-                      <span className="text-xs font-bold tracking-widest text-gray-400 uppercase flex items-center">
-                        TREND PERIOD <span className="text-[#F3940B] ml-0.5">*</span>
-                        {pipelineFieldsDisabled && <InfoButton message="Please reset in order to apply filters for new search" />}
-                      </span>
-                      <div className="relative trend-dropdown">
-                        <button
-                          onClick={() => !pipelineFieldsDisabled && setShowTrendDropdown(!showTrendDropdown)}
-                          disabled={pipelineFieldsDisabled}
-                          className={`px-4 py-2.5 text-black bg-white border rounded-lg focus:outline-none focus:ring-2 focus:ring-[#F3940B]/40 min-w-[150px] flex items-center justify-between ${trendPeriodError ? 'border-red-500' : 'border-gray-300'
-                            } ${pipelineFieldsDisabled ? 'opacity-50 cursor-not-allowed' : ''}`}
-                        >
-                          <span>{trendPeriod || 'Select period'}</span>
-                          <span className="ml-2">▼</span>
-                        </button>
-                        {showTrendDropdown && (
-                          <div className="absolute top-full left-0 mt-1 w-full bg-white border border-gray-300 shadow-lg z-50 max-h-48 overflow-y-auto">
-                            {Array.from({ length: 12 }, (_, i) => i + 1).map((period) => (
-                              <button
-                                key={period}
-                                onClick={() => {
-                                  setTrendPeriod(period.toString());
-                                  setShowTrendDropdown(false);
-                                  if (trendPeriodError) {
-                                    setTrendPeriodError('');
-                                  }
-                                }}
-                                className="w-full px-3 py-2 text-left text-black hover:bg-gray-100 focus:outline-none focus:bg-gray-100"
-                              >
-                                {period}
-                              </button>
-                            ))}
-                          </div>
-                        )}
-                      </div>
+                  <div>
+                    <label className="block text-xs font-bold tracking-widest text-gray-400 uppercase mb-2 flex items-center">
+                      TREND PERIOD <span className="text-[#F3940B] ml-0.5">*</span>
+                      {pipelineFieldsDisabled && <InfoButton message="Please reset in order to apply filters for new search" />}
+                    </label>
+                    <div className="relative trend-dropdown">
+                      <button
+                        onClick={() => !pipelineFieldsDisabled && setShowTrendDropdown(!showTrendDropdown)}
+                        disabled={pipelineFieldsDisabled}
+                        className={`w-full px-4 py-2.5 text-black bg-white border rounded-lg focus:outline-none focus:ring-2 focus:ring-[#F3940B]/40 flex items-center justify-between ${trendPeriodError ? 'border-red-500' : 'border-gray-300'
+                          } ${pipelineFieldsDisabled ? 'opacity-50 cursor-not-allowed' : ''}`}
+                      >
+                        <span>{trendPeriod || 'Select period'}</span>
+                        <span className="ml-2">▼</span>
+                      </button>
+                      {showTrendDropdown && (
+                        <div className="absolute top-full left-0 mt-1 w-full bg-white border border-gray-300 shadow-lg z-50 max-h-48 overflow-y-auto">
+                          {Array.from({ length: 12 }, (_, i) => i + 1).map((period) => (
+                            <button
+                              key={period}
+                              onClick={() => {
+                                setTrendPeriod(period.toString());
+                                setShowTrendDropdown(false);
+                                if (trendPeriodError) setTrendPeriodError('');
+                              }}
+                              className="w-full px-3 py-2 text-left text-black hover:bg-gray-100 focus:outline-none focus:bg-gray-100"
+                            >
+                              {period}
+                            </button>
+                          ))}
+                        </div>
+                      )}
                     </div>
                     {trendPeriodError && (
-                      <p className="text-red-400 text-xs ml-28">{trendPeriodError}</p>
+                      <p className="text-red-400 text-xs mt-1">{trendPeriodError}</p>
                     )}
                   </div>
                 )}
@@ -3267,11 +3263,11 @@ const Dashboard = () => {
                 {activeSearch && (
                   <>
                     <div>
-                      <label className="block text-xs font-bold tracking-widest text-gray-400 uppercase mb-2 flex items-center">
+                      <label className="block text-xs font-bold tracking-widest text-gray-400 uppercase mb-1 flex items-center">
                         VARIANT LIMIT MAX <span className="text-[#F3940B] ml-0.5">*</span>
                         {pipelineFieldsDisabled && <InfoButton message="Please reset in order to apply filters for new search" />}
                       </label>
-                      <p className="text-[10px] text-gray-500 mb-1">1–30 keywords per run · Enter <strong className="text-[#C0FE72]">0</strong> to fetch all &amp; process in batches of 30</p>
+                      <p className="text-[10px] text-gray-500 mb-2 leading-tight">1–30 per run · Enter <strong className="text-[#C0FE72]">0</strong> to fetch all & process in batches of 30</p>
                       <input
                         type="text"
                         value={variantLimitMax}
@@ -3286,7 +3282,7 @@ const Dashboard = () => {
                             if (isNaN(parsed)) {
                               setVariantLimitMaxError('Must be a number');
                             } else if (parsed !== 0 && parsed > 30) {
-                              setVariantLimitMaxError('Limit max to 30. Use 0 for unlimited (batched in groups of 30)');
+                              setVariantLimitMaxError('Use 0 for unlimited (batched in 30s)');
                             } else if (variantLimitMaxError) {
                               setVariantLimitMaxError('');
                             }
@@ -3300,10 +3296,11 @@ const Dashboard = () => {
                       )}
                     </div>
                     <div>
-                      <label className="block text-xs font-bold tracking-widest text-gray-400 uppercase mb-2 flex items-center">
+                      <label className="block text-xs font-bold tracking-widest text-gray-400 uppercase mb-1 flex items-center">
                         RESULTS CAP MAX <span className="text-[#F3940B] ml-0.5">*</span>
                         {pipelineFieldsDisabled && <InfoButton message="Please reset in order to apply filters for new search" />}
                       </label>
+                      <p className="text-[10px] text-gray-500 mb-2 leading-tight invisible" aria-hidden="true">placeholder</p>
                       <input
                         type="text"
                         value={resultsCap}

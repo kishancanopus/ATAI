@@ -362,7 +362,9 @@ export function needsBusinessSummaryRefresh(exec: CategoryExecution): boolean {
   if (!exec.execution_arn) return false;
   if (exec.pipeline_summary?.pipeline_status) return false;
   if (exec.status === 'PENDING' || exec.status === 'STARTING') return false;
-  return isTerminalAwsStatus(exec.status) || exec.status === 'RUNNING';
+  // Only refresh for RUNNING or SUCCEEDED executions.
+  // FAILED, TIMED_OUT, and ABORTED executions won't have successful summaries to fetch.
+  return exec.status === 'SUCCEEDED' || exec.status === 'RUNNING';
 }
 
 /** Resolve business pipeline status for a category child execution */
