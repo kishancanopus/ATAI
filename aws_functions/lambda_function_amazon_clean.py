@@ -84,7 +84,7 @@ def normalize_item(item, keyword, geo, date, search_category):
         "title": safe_get(item, "title"),
         "category": extract_category(item),
         "search_category": search_category,
-        "amazon_price_usd": parse_int(safe_get(item, "price")),
+        "amazon_price_usd": parse_price(safe_get(item, "price")),
         "reviews_count": parse_int(safe_get(item, "reviews_count")),
         "rating":parse_float(safe_get(item, "rating")),
         "bestseller_rank": parse_int(safe_get(item, "bestseller_rank")),
@@ -114,6 +114,28 @@ def apply_amazon_filters(df, filters):
     reviews_max = filters.get("reviews_max")
     min_rating = filters.get("min_rating")
 
+    # Helper to check if filter is active (not None, not 0, and not default maxes)
+    def is_active_min(val):
+        if val is None: return False
+        try:
+            return float(val) > 0
+        except:
+            return False
+
+    def is_active_max(val):
+        if val is None: return False
+        try:
+            fval = float(val)
+            return fval > 0 and fval < 999999
+        except:
+            return False
+
+    has_price_min = is_active_min(price_min)
+    has_price_max = is_active_max(price_max)
+    has_reviews_min = is_active_min(reviews_min)
+    has_reviews_max = is_active_max(reviews_max)
+    has_rating_min = is_active_min(min_rating)
+
     filtered_rows = []
 
     print(f"📊 Before filter: {len(df)}")
@@ -125,20 +147,25 @@ def apply_amazon_filters(df, filters):
         rating = row.get("rating")
 
         # PRICE
-        if price_min is not None and (price is None or price < float(price_min)):
-            continue
-        if price_max is not None and (price is None or price > float(price_max)):
-            continue
+        if has_price_min:
+            if price is None or price < float(price_min):
+                continue
+        if has_price_max:
+            if price is None or price > float(price_max):
+                continue
 
         # REVIEWS
-        if reviews_min is not None and (reviews is None or reviews < int(reviews_min)):
-            continue
-        if reviews_max is not None and (reviews is None or reviews > int(reviews_max)):
-            continue
+        if has_reviews_min:
+            if reviews is None or reviews < int(reviews_min):
+                continue
+        if has_reviews_max:
+            if reviews is None or reviews > int(reviews_max):
+                continue
 
         # RATING
-        if min_rating is not None and (rating is None or rating < float(min_rating)):
-            continue
+        if has_rating_min:
+            if rating is None or rating < float(min_rating):
+                continue
 
         filtered_rows.append(row)
 
