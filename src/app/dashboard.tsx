@@ -940,11 +940,10 @@ const Dashboard = () => {
             </span>
           </div>
           <p
-            className={`text-xs leading-relaxed ${
-              isErrorLike
-                ? 'text-red-300/95 max-h-28 overflow-y-auto whitespace-normal break-words pr-1'
-                : 'text-gray-400 line-clamp-3'
-            }`}
+            className={`text-xs leading-relaxed ${isErrorLike
+              ? 'text-red-300/95 max-h-28 overflow-y-auto whitespace-normal break-words pr-1'
+              : 'text-gray-400 line-clamp-3'
+              }`}
             title={message !== displayMessage ? message : undefined}
           >
             {displayMessage}
@@ -978,17 +977,16 @@ const Dashboard = () => {
                     <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-blue-400 opacity-75"></span>
                   )}
                   <span
-                    className={`relative inline-flex rounded-full h-2.5 w-2.5 ${
-                      overallStatus === 'SUCCEEDED'
-                        ? 'bg-green-400'
-                        : overallStatus === 'PARTIALLY_SUCCEEDED'
-                          ? 'bg-orange-400'
-                          : overallStatus === 'FAILED'
-                            ? 'bg-red-400'
-                            : overallStatus === 'RUNNING'
-                              ? 'bg-blue-400'
-                              : 'bg-gray-500'
-                    }`}
+                    className={`relative inline-flex rounded-full h-2.5 w-2.5 ${overallStatus === 'SUCCEEDED'
+                      ? 'bg-green-400'
+                      : overallStatus === 'PARTIALLY_SUCCEEDED'
+                        ? 'bg-orange-400'
+                        : overallStatus === 'FAILED'
+                          ? 'bg-red-400'
+                          : overallStatus === 'RUNNING'
+                            ? 'bg-blue-400'
+                            : 'bg-gray-500'
+                      }`}
                   ></span>
                 </span>
                 PIPELINE EXECUTION HUB
@@ -1007,17 +1005,16 @@ const Dashboard = () => {
 
             <div className="flex items-center gap-3">
               <span
-                className={`inline-flex items-center gap-1.5 px-3 py-1 rounded-lg text-xs font-extrabold uppercase tracking-wide border ${
-                  overallStatus === 'SUCCEEDED'
-                    ? 'bg-green-500/10 text-green-400 border-green-500/20'
-                    : overallStatus === 'PARTIALLY_SUCCEEDED'
-                      ? 'bg-orange-500/10 text-orange-400 border-orange-500/20'
-                      : overallStatus === 'FAILED'
-                        ? 'bg-red-500/10 text-red-400 border-red-500/20'
-                        : overallStatus === 'RUNNING'
-                          ? 'bg-blue-500/10 text-blue-400 border-blue-500/20 animate-pulse'
-                          : 'bg-white/5 text-gray-400 border-white/10'
-                }`}
+                className={`inline-flex items-center gap-1.5 px-3 py-1 rounded-lg text-xs font-extrabold uppercase tracking-wide border ${overallStatus === 'SUCCEEDED'
+                  ? 'bg-green-500/10 text-green-400 border-green-500/20'
+                  : overallStatus === 'PARTIALLY_SUCCEEDED'
+                    ? 'bg-orange-500/10 text-orange-400 border-orange-500/20'
+                    : overallStatus === 'FAILED'
+                      ? 'bg-red-500/10 text-red-400 border-red-500/20'
+                      : overallStatus === 'RUNNING'
+                        ? 'bg-blue-500/10 text-blue-400 border-blue-500/20 animate-pulse'
+                        : 'bg-white/5 text-gray-400 border-white/10'
+                  }`}
               >
                 {overallStatus}
               </span>
@@ -1040,36 +1037,36 @@ const Dashboard = () => {
               textClass = 'text-green-300';
               statusMessageText = summary
                 ? getPipelineUserMessage({
-                    pipelineStatus: summary.pipeline_status,
-                    stages: summary.stages,
-                    amazonFilters,
-                    alibabaFilters,
-                    displayStatus: overallStatus,
-                  })
+                  pipelineStatus: summary.pipeline_status,
+                  stages: summary.stages,
+                  amazonFilters,
+                  alibabaFilters,
+                  displayStatus: overallStatus,
+                })
                 : 'All stages completed successfully';
             } else if (overallStatus === 'PARTIALLY_SUCCEEDED') {
               bannerBg = 'bg-orange-500/5 border-orange-500/20';
               textClass = 'text-orange-300';
               statusMessageText = summary
                 ? getPipelineUserMessage({
-                    pipelineStatus: summary.pipeline_status,
-                    stages: summary.stages,
-                    amazonFilters,
-                    alibabaFilters,
-                    displayStatus: overallStatus,
-                  })
+                  pipelineStatus: summary.pipeline_status,
+                  stages: summary.stages,
+                  amazonFilters,
+                  alibabaFilters,
+                  displayStatus: overallStatus,
+                })
                 : 'Completed with some stages skipped or incomplete';
             } else if (overallStatus === 'FAILED') {
               bannerBg = 'bg-red-500/5 border-red-500/20';
               textClass = 'text-red-300';
               statusMessageText = summary
                 ? getPipelineUserMessage({
-                    pipelineStatus: summary.pipeline_status,
-                    stages: summary.stages,
-                    amazonFilters,
-                    alibabaFilters,
-                    displayStatus: overallStatus,
-                  })
+                  pipelineStatus: summary.pipeline_status,
+                  stages: summary.stages,
+                  amazonFilters,
+                  alibabaFilters,
+                  displayStatus: overallStatus,
+                })
                 : formatPipelineStageMessage(statusMessage, 'Pipeline execution failed');
             } else {
               statusMessageText = 'Pipeline is pending execution.';
@@ -1795,16 +1792,16 @@ const Dashboard = () => {
               kwp: kwpData?.success && kwpData?.available ? (kwpData.results || []) : [],
               trends: trendsData?.success && trendsData?.available
                 ? (trendsData.results || []).map((r: any) => ({
-                    ...r,
-                    root_keyword: exec.keyword,
-                  }))
+                  ...r,
+                  root_keyword: exec.keyword,
+                }))
                 : [],
               amz: amzData?.success && amzData?.available ? (amzData.results || []) : [],
               ali: aliData?.success && aliData?.available
                 ? (aliData.results || []).map((r: any) => ({
-                    ...r,
-                    root_keyword: exec.keyword,
-                  }))
+                  ...r,
+                  root_keyword: exec.keyword,
+                }))
                 : [],
             };
           });
@@ -2736,11 +2733,11 @@ const Dashboard = () => {
               prev.map((e) =>
                 (e.keyword ?? '').trim() === selected
                   ? mergeCategoryExecutionRow(e, {
-                      keyword: e.keyword,
-                      status: statusData.status || e.status,
-                      pipeline_summary: summary,
-                      pipeline_status: summary.pipeline_status,
-                    })
+                    keyword: e.keyword,
+                    status: statusData.status || e.status,
+                    pipeline_summary: summary,
+                    pipeline_status: summary.pipeline_status,
+                  })
                   : e
               )
             );
@@ -3024,9 +3021,9 @@ const Dashboard = () => {
 
             setStatusMessage(
               summary?.message ||
-                (searchingMode === 'CATEGORY BASED'
-                  ? 'Pipeline completed! View stage data below.'
-                  : 'Pipeline completed successfully! Fetching final results...')
+              (searchingMode === 'CATEGORY BASED'
+                ? 'Pipeline completed! View stage data below.'
+                : 'Pipeline completed successfully! Fetching final results...')
             );
             clearInterval(pollingInterval);
             setPollingIntervalRef(null);
@@ -3086,26 +3083,26 @@ const Dashboard = () => {
       {/* Main Content */}
       <div className="max-w-7xl mx-auto">
         {/* Top Row: Searching Filters, Location, Active Search */}
-        <div className="grid grid-cols-1 lg:grid-cols-3 gap-6 mb-8 items-center">
+        <div className="grid grid-cols-1 lg:grid-cols-3 gap-6 mb-8 items-center bg-[#243022]/40 border border-white/5 px-5 py-4 rounded-xl">
           {/* Left: Searching Filters */}
-          <div>
-            <div className="border border-white/40 bg-white/5 px-4 py-3 rounded-lg backdrop-blur-sm">
+          <div className="w-full">
+            <div className="border border-white/15 bg-black/20 hover:border-white/30 px-4 py-2.5 rounded-lg transition-all">
               <input
                 type="text"
                 value={searchingFilters}
                 disabled={fieldsDisabled}
                 onChange={(e) => setSearchingFilters(e.target.value)}
                 placeholder="SEARCHING FILTERS:"
-                className={`w-full h-10 text-white text-base bg-transparent border-none outline-none placeholder-gray-400 font-semibold tracking-widest ${fieldsDisabled ? 'opacity-50 cursor-not-allowed' : ''}`}
+                className={`w-full h-6 text-white text-sm bg-transparent border-none outline-none placeholder-white/30 font-semibold tracking-widest ${fieldsDisabled ? 'opacity-50 cursor-not-allowed' : ''}`}
               />
             </div>
           </div>
 
           {/* Center: Location */}
-          <div className="flex flex-col items-center justify-center gap-2">
-            <div className="flex items-center gap-4">
-              <label className="text-xs font-bold tracking-widest text-gray-300 uppercase flex items-center">
-                LOCATION: <span className="text-[#F3940B] ml-0.5">*</span>
+          <div className="flex flex-col items-center justify-center w-full">
+            <div className="flex items-center gap-3 w-full justify-center">
+              <label className="text-xs font-bold tracking-widest text-gray-400 uppercase shrink-0">
+                LOCATION: <span className="text-[#F3940B]">*</span>
               </label>
               <select
                 value={location}
@@ -3116,12 +3113,12 @@ const Dashboard = () => {
                     setLocationError('');
                   }
                 }}
-                className={`px-4 py-2 text-white bg-[#2a3828] border rounded-lg focus:outline-none focus:border-[#F3940B] transition-colors ${locationError ? 'border-red-500' : 'border-white/40'
+                className={`px-4 py-2.5 text-sm text-white bg-[#131b12] border rounded-lg focus:outline-none focus:border-[#F3940B] transition-all cursor-pointer ${locationError ? 'border-red-500' : 'border-white/15 hover:border-white/30'
                   } ${fieldsDisabled ? 'opacity-50 cursor-not-allowed' : ''}`}
               >
-                <option value="">Select a country</option>
+                <option value="" className="bg-[#1a2318] text-white">Select a country</option>
                 {countries.map((country) => (
-                  <option key={country.code} value={country.name}>
+                  <option key={country.code} value={country.name} className="bg-[#1a2318] text-white">
                     {country.name}
                   </option>
                 ))}
@@ -3179,10 +3176,10 @@ const Dashboard = () => {
                 ))}
               </div>
 
-              {/* Search Fields in 2x2 grid */}
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-5">
+              {/* Search Fields in 2x2 grid — items-end so all inputs share same baseline */}
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-5 items-end">
                 {searchingMode === 'MANUAL' ? (
-                  <div>
+                  <div className="min-h-[76px] flex flex-col justify-end">
                     <label className="block text-xs font-bold tracking-widest text-gray-400 uppercase mb-2 flex items-center">
                       KEYWORD SEARCH <span className="text-[#F3940B] ml-0.5">*</span>
                     </label>
@@ -3192,11 +3189,10 @@ const Dashboard = () => {
                       disabled={fieldsDisabled}
                       onChange={(e) => {
                         setKeywordSearch(e.target.value);
-                        if (keywordSearchError) {
-                          setKeywordSearchError('');
-                        }
+                        if (keywordSearchError) setKeywordSearchError('');
                       }}
-                      className={`w-full px-4 py-2.5 text-black bg-white border rounded-lg focus:outline-none focus:ring-2 focus:ring-[#F3940B]/40 ${keywordSearchError ? 'border-red-500' : 'border-gray-300'
+                      placeholder="e.g. smart thermostat"
+                      className={`w-full px-4 py-2.5 text-white bg-black/20 border rounded-lg focus:outline-none focus:ring-2 focus:ring-[#F3940B]/40 placeholder-white/30 transition-all ${keywordSearchError ? 'border-red-500' : 'border-white/15 hover:border-white/30'
                         } ${fieldsDisabled ? 'opacity-50 cursor-not-allowed' : ''}`}
                     />
                     {keywordSearchError && (
@@ -3204,23 +3200,23 @@ const Dashboard = () => {
                     )}
                   </div>
                 ) : (
-                  <div className="flex flex-col gap-2">
-                    <label className="text-xs font-bold tracking-widest text-gray-400 uppercase">PRODUCT CATEGORY <span className="text-[#F3940B]">*</span></label>
+                  <div className="min-h-[76px] flex flex-col justify-end">
+                    <label className="text-xs font-bold tracking-widest text-gray-400 uppercase mb-2">PRODUCT CATEGORY <span className="text-[#F3940B]">*</span></label>
                     <select
                       value={productCategory}
                       disabled={fieldsDisabled}
                       onChange={(e) => setProductCategory(e.target.value)}
-                      className={`w-full px-4 py-2.5 text-black bg-white border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-[#F3940B]/40 ${fieldsDisabled ? 'opacity-50 cursor-not-allowed' : ''}`}
+                      className={`w-full px-4 py-2.5 text-white bg-[#131b12] border border-white/15 hover:border-white/30 rounded-lg focus:outline-none focus:ring-2 focus:ring-[#F3940B]/40 transition-all ${fieldsDisabled ? 'opacity-50 cursor-not-allowed' : ''}`}
                     >
                       {GT_CATEGORIES.map((cat) => (
-                        <option key={cat} value={cat}>{cat}</option>
+                        <option key={cat} value={cat} className="bg-[#1a2318] text-white">{cat}</option>
                       ))}
                     </select>
                   </div>
                 )}
                 {/* Trend Period - only show when Active Search is ON */}
                 {activeSearch && (
-                  <div>
+                  <div className="min-h-[76px] flex flex-col justify-end">
                     <label className="block text-xs font-bold tracking-widest text-gray-400 uppercase mb-2 flex items-center">
                       TREND PERIOD <span className="text-[#F3940B] ml-0.5">*</span>
                       {pipelineFieldsDisabled && <InfoButton message="Please reset in order to apply filters for new search" />}
@@ -3229,14 +3225,14 @@ const Dashboard = () => {
                       <button
                         onClick={() => !pipelineFieldsDisabled && setShowTrendDropdown(!showTrendDropdown)}
                         disabled={pipelineFieldsDisabled}
-                        className={`w-full px-4 py-2.5 text-black bg-white border rounded-lg focus:outline-none focus:ring-2 focus:ring-[#F3940B]/40 flex items-center justify-between ${trendPeriodError ? 'border-red-500' : 'border-gray-300'
+                        className={`w-full px-4 py-2.5 text-white bg-black/20 border rounded-lg focus:outline-none focus:ring-2 focus:ring-[#F3940B]/40 flex items-center justify-between transition-all ${trendPeriodError ? 'border-red-500' : 'border-white/15 hover:border-white/30'
                           } ${pipelineFieldsDisabled ? 'opacity-50 cursor-not-allowed' : ''}`}
                       >
                         <span>{trendPeriod || 'Select period'}</span>
-                        <span className="ml-2">▼</span>
+                        <span className="ml-2 text-white/40 text-xs">▼</span>
                       </button>
                       {showTrendDropdown && (
-                        <div className="absolute top-full left-0 mt-1 w-full bg-white border border-gray-300 shadow-lg z-50 max-h-48 overflow-y-auto">
+                        <div className="absolute top-full left-0 mt-1 w-full bg-[#131b12] border border-white/15 rounded-lg shadow-2xl z-50 max-h-48 overflow-y-auto">
                           {Array.from({ length: 12 }, (_, i) => i + 1).map((period) => (
                             <button
                               key={period}
@@ -3245,7 +3241,7 @@ const Dashboard = () => {
                                 setShowTrendDropdown(false);
                                 if (trendPeriodError) setTrendPeriodError('');
                               }}
-                              className="w-full px-3 py-2 text-left text-black hover:bg-gray-100 focus:outline-none focus:bg-gray-100"
+                              className="w-full px-3 py-2 text-left text-white hover:bg-white/10 focus:outline-none transition-colors"
                             >
                               {period}
                             </button>
@@ -3262,7 +3258,7 @@ const Dashboard = () => {
                 {/* VARIANT LIMIT MAX and RESULTS CAP MAX - only show when Active Search is ON */}
                 {activeSearch && (
                   <>
-                    <div>
+                    <div className="min-h-[105px] flex flex-col justify-end">
                       <label className="block text-xs font-bold tracking-widest text-gray-400 uppercase mb-1 flex items-center">
                         VARIANT LIMIT MAX <span className="text-[#F3940B] ml-0.5">*</span>
                         {pipelineFieldsDisabled && <InfoButton message="Please reset in order to apply filters for new search" />}
@@ -3288,14 +3284,15 @@ const Dashboard = () => {
                             }
                           }
                         }}
-                        className={`w-full px-4 py-2.5 text-black bg-white border rounded-lg focus:outline-none focus:ring-2 focus:ring-[#F3940B]/40 ${variantLimitMaxError ? 'border-red-500' : 'border-gray-300'
+                        placeholder="e.g. 5"
+                        className={`w-full px-4 py-2.5 text-white bg-black/20 border rounded-lg focus:outline-none focus:ring-2 focus:ring-[#F3940B]/40 placeholder-white/30 transition-all ${variantLimitMaxError ? 'border-red-500' : 'border-white/15 hover:border-white/30'
                           } ${pipelineFieldsDisabled ? 'opacity-50 cursor-not-allowed' : ''}`}
                       />
                       {variantLimitMaxError && (
                         <p className="text-red-400 text-xs mt-1">{variantLimitMaxError}</p>
                       )}
                     </div>
-                    <div>
+                    <div className="min-h-[105px] flex flex-col justify-end">
                       <label className="block text-xs font-bold tracking-widest text-gray-400 uppercase mb-1 flex items-center">
                         RESULTS CAP MAX <span className="text-[#F3940B] ml-0.5">*</span>
                         {pipelineFieldsDisabled && <InfoButton message="Please reset in order to apply filters for new search" />}
@@ -3319,7 +3316,8 @@ const Dashboard = () => {
                             }
                           }
                         }}
-                        className={`w-full px-4 py-2.5 text-black bg-white border rounded-lg focus:outline-none focus:ring-2 focus:ring-[#F3940B]/40 ${resultsCapError ? 'border-red-500' : 'border-gray-300'
+                        placeholder="e.g. 10"
+                        className={`w-full px-4 py-2.5 text-white bg-black/20 border rounded-lg focus:outline-none focus:ring-2 focus:ring-[#F3940B]/40 placeholder-white/30 transition-all ${resultsCapError ? 'border-red-500' : 'border-white/15 hover:border-white/30'
                           } ${pipelineFieldsDisabled ? 'opacity-50 cursor-not-allowed' : ''}`}
                       />
                       {resultsCapError && (
@@ -3331,16 +3329,16 @@ const Dashboard = () => {
               </div>
             </div>
 
-            {/* Right: Blacklisted Words */}
-            <div>
+            {/* Right: Blacklisted Words — grows to match left grid height */}
+            <div className="flex flex-col h-62 pt-13">
               <label className="block text-xs font-bold tracking-widest text-gray-400 uppercase mb-2">BLACKLISTED WORDS</label>
               <div
-                className="flex flex-col w-full h-32 bg-[#FFFFFF] border border-gray-600 focus-within:border-blue-500 overflow-hidden cursor-text"
+                className={`flex flex-col w-full flex-1 min-h-[160px] bg-black/20 border rounded-lg focus-within:ring-2 focus-within:ring-blue-500/30 overflow-hidden cursor-text transition-all ${fieldsDisabled ? 'opacity-50 border-white/10' : 'border-white/15 hover:border-white/30'}`}
                 onClick={() => document.getElementById('blacklist-input')?.focus()}
               >
-                <div className="flex flex-wrap gap-2 p-2 overflow-y-auto w-full h-full content-start">
+                <div className="flex flex-wrap gap-2 p-2.5 overflow-y-auto w-full h-full content-start">
                   {blacklistedWords.map((word, index) => (
-                    <div key={index} className="flex items-center gap-1 bg-gray-200 text-black px-2 py-1 rounded-md text-sm border border-gray-300 shadow-sm leading-none shrink-0">
+                    <div key={index} className="flex items-center gap-1 bg-[#1a2318] text-white px-2 py-0.5 rounded border border-white/15 text-xs shadow-sm leading-none shrink-0">
                       <span className="max-w-[150px] truncate" title={word}>{word}</span>
                       <button
                         onClick={(e) => {
@@ -3348,7 +3346,7 @@ const Dashboard = () => {
                           e.stopPropagation();
                           setBlacklistedWords(prev => prev.filter((_, i) => i !== index));
                         }}
-                        className={`text-gray-500 hover:text-red-500 rounded-full w-4 h-4 flex items-center justify-center font-bold text-lg leading-none shrink-0 pb-1 ${fieldsDisabled ? 'opacity-30 cursor-not-allowed' : ''}`}
+                        className={`text-gray-400 hover:text-red-400 rounded-full w-4 h-4 flex items-center justify-center font-bold text-base leading-none shrink-0 pb-0.5 ${fieldsDisabled ? 'opacity-30 cursor-not-allowed' : ''}`}
                         title="Remove word"
                       >
                         &times;
@@ -3381,12 +3379,10 @@ const Dashboard = () => {
                           setBlacklistInput('');
                         }
                       } else if (e.key === 'Backspace' && blacklistInput === '' && blacklistedWords.length > 0) {
-                        // Remove the last chip if backspace is pressed on empty input
                         setBlacklistedWords(prev => prev.slice(0, -1));
                       }
                     }}
                     onBlur={() => {
-                      // Automatically convert any leftover text into a chip when clicking away
                       const val = blacklistInput.trim();
                       if (val) {
                         setBlacklistedWords(prev => prev.includes(val) ? prev : [...prev, val]);
@@ -3394,7 +3390,7 @@ const Dashboard = () => {
                       }
                     }}
                     placeholder={blacklistedWords.length === 0 ? "Type and press Enter or comma..." : ""}
-                    className="flex-1 min-w-[120px] bg-transparent outline-none text-black text-sm h-7"
+                    className="flex-1 min-w-[120px] bg-transparent outline-none text-white placeholder-white/30 text-xs h-7"
                   />
                 </div>
               </div>
@@ -3404,70 +3400,66 @@ const Dashboard = () => {
 
         {/* Fourth Row: Google Trend Score, KWP Monthly Searches */}
         <div className="bg-[#243022] border border-white/10 rounded-xl px-6 py-5 mb-6 shadow-lg">
-          <div className="flex flex-wrap items-center gap-8 lg:gap-14">
-            {/* Google Trend Score */}
-            <div className="flex items-center gap-4">
+          <div className="flex flex-wrap items-end gap-8 lg:gap-14">
+            {/* Google Trend Score — label above, slider widget below */}
+            <div className="flex flex-col gap-2">
               <span className="text-xs font-bold tracking-widest text-gray-400 uppercase">GOOGLE TREND SCORE</span>
-              <div className="h-5 flex items-center bg-white px-3 py-2 ">
-                <svg width="20" height="12" viewBox="0 0 20 12" className="mr-2">
-                  {/* Google Trends icon */}
+              <div className="flex items-center gap-2 bg-black/25 border border-white/10 rounded-lg px-3 py-2">
+                <svg width="18" height="11" viewBox="0 0 20 12" className="opacity-80 shrink-0">
                   <path d="M2 10 L6 6 L10 8 L18 2" stroke="#4285f4" strokeWidth="2" fill="none" strokeLinecap="round" strokeLinejoin="round" />
                   <circle cx="2" cy="10" r="2" fill="#34a853" />
                   <circle cx="6" cy="6" r="2" fill="#fbbc04" />
                   <circle cx="10" cy="8" r="2" fill="#ea4335" />
                   <circle cx="18" cy="2" r="2" fill="#4285f4" />
                 </svg>
-                <div className="flex items-center gap-2">
-                  <span className="text-xs text-gray-800">0</span>
-                  <div className="relative w-20">
-                    <input
-                      type="range"
-                      min="0"
-                      max="100"
-                      value={googleTrendScore}
-                      disabled={fieldsDisabled}
-                      onChange={(e) => setGoogleTrendScore(Number(e.target.value))}
-                      className={`w-full h-2 bg-gray-300 rounded-full appearance-none ${fieldsDisabled ? 'cursor-not-allowed' : 'cursor-pointer'}`}
-                      style={{
-                        background: `linear-gradient(to right, #10b981 0%, #10b981 ${googleTrendScore}%, #d1d5db ${googleTrendScore}%, #d1d5db 100%)`,
-                        WebkitAppearance: 'none',
-                        outline: 'none'
-                      }}
-                    />
-                    <style jsx>{`
-                    input[type="range"]::-webkit-slider-thumb {
-                      appearance: none;
-                      width: 14px;
-                      height: 14px;
-                      border-radius: 50%;
-                      background: #2563eb;
-                      cursor: pointer;
-                      border: none;
-                      box-shadow: 0 2px 4px rgba(0,0,0,0.2);
-                    }
-                    
-                    input[type="range"]::-moz-range-thumb {
-                      width: 14px;
-                      height: 14px;
-                      border-radius: 50%;
-                      background: #2563eb;
-                      cursor: pointer;
-                      border: none;
-                      box-shadow: 0 2px 4px rgba(0,0,0,0.2);
-                    }
-                  `}</style>
-                  </div>
-                  <span className="text-xs font-medium text-gray-800 min-w-[2.5rem] text-right">
-                    {googleTrendScore}
-                  </span>
+                <span className="text-xs text-gray-400">0</span>
+                <div className="relative w-24">
+                  <input
+                    type="range"
+                    min="0"
+                    max="100"
+                    value={googleTrendScore}
+                    disabled={fieldsDisabled}
+                    onChange={(e) => setGoogleTrendScore(Number(e.target.value))}
+                    className={`w-full h-1 rounded-full appearance-none ${fieldsDisabled ? 'cursor-not-allowed' : 'cursor-pointer'}`}
+                    style={{
+                      background: `linear-gradient(to right, #C0FE72 0%, #C0FE72 ${googleTrendScore}%, rgba(255,255,255,0.1) ${googleTrendScore}%, rgba(255,255,255,0.1) 100%)`,
+                      WebkitAppearance: 'none',
+                      outline: 'none'
+                    }}
+                  />
+                  <style jsx>{`
+                  input[type="range"]::-webkit-slider-thumb {
+                    appearance: none;
+                    width: 12px;
+                    height: 12px;
+                    border-radius: 50%;
+                    background: #F3940B;
+                    cursor: pointer;
+                    border: none;
+                    box-shadow: 0 1px 4px rgba(0,0,0,0.4);
+                  }
+                  input[type="range"]::-moz-range-thumb {
+                    width: 12px;
+                    height: 12px;
+                    border-radius: 50%;
+                    background: #F3940B;
+                    cursor: pointer;
+                    border: none;
+                    box-shadow: 0 1px 4px rgba(0,0,0,0.4);
+                  }
+                `}</style>
                 </div>
+                <span className="text-xs font-semibold text-white min-w-[2rem] text-right">{googleTrendScore}</span>
               </div>
             </div>
+
+            {/* KWP Monthly Searches */}
             <div>
               <label className="block text-xs font-bold tracking-widest text-gray-400 uppercase mb-2">KWP MONTHLY SEARCHES</label>
               <div className="flex items-center gap-2">
                 <div className="flex flex-col items-start gap-1 flex-1">
-                  <span className="text-xs text-gray-300">MIN</span>
+                  <span className="text-[10px] text-gray-400">MIN</span>
                   <input
                     type="number"
                     min="0"
@@ -3475,12 +3467,12 @@ const Dashboard = () => {
                     disabled={fieldsDisabled}
                     onChange={(e) => setKwpMinSearches(e.target.value)}
                     placeholder="e.g. 1000"
-                    className={`w-full px-3 py-2 text-black bg-[#FFFFFF] border border-gray-600 focus:outline-none focus:border-blue-500 ${fieldsDisabled ? 'opacity-50 cursor-not-allowed' : ''}`}
+                    className={`w-full px-3 py-1.5 text-white bg-black/20 border rounded-lg focus:outline-none focus:ring-1 focus:ring-blue-500 placeholder-white/20 transition-all ${fieldsDisabled ? 'opacity-50 border-white/10 cursor-not-allowed' : 'border-white/15 hover:border-white/30'}`}
                   />
                 </div>
-                <span className="text-gray-300 mt-5">–</span>
+                <span className="text-gray-400 mt-5">–</span>
                 <div className="flex flex-col items-start gap-1 flex-1">
-                  <span className="text-xs text-gray-300">MAX</span>
+                  <span className="text-[10px] text-gray-400">MAX</span>
                   <input
                     type="number"
                     min="0"
@@ -3488,15 +3480,11 @@ const Dashboard = () => {
                     disabled={fieldsDisabled}
                     onChange={(e) => setKwpMaxSearches(e.target.value)}
                     placeholder="e.g. 50000"
-                    className={`w-full px-3 py-2 text-black bg-[#FFFFFF] border border-gray-600 focus:outline-none focus:border-blue-500 ${fieldsDisabled ? 'opacity-50 cursor-not-allowed' : ''}`}
+                    className={`w-full px-3 py-1.5 text-white bg-black/20 border rounded-lg focus:outline-none focus:ring-1 focus:ring-blue-500 placeholder-white/20 transition-all ${fieldsDisabled ? 'opacity-50 border-white/10 cursor-not-allowed' : 'border-white/15 hover:border-white/30'}`}
                   />
                 </div>
               </div>
             </div>
-
-
-            {/* Trend Period */}
-
           </div>
         </div>
 
@@ -3523,26 +3511,28 @@ const Dashboard = () => {
             <div className="flex items-center gap-3">
               <span className={`text-xs font-bold tracking-widest uppercase ${!amazonFilters ? 'text-gray-500' : 'text-gray-300'}`}>PRICE FILTER</span>
               <div className="flex items-center gap-2">
-                <span className={`text-sm ${!amazonFilters ? 'text-gray-400' : ''}`}>MIN</span>
+                <span className={`text-xs ${!amazonFilters ? 'text-gray-500' : 'text-gray-400'}`}>MIN</span>
                 <input
                   type="text"
                   value={priceMin}
                   onChange={(e) => setPriceMin(Number(e.target.value) || 0)}
                   disabled={!amazonFilters || fieldsDisabled}
-                  className={`w-12 h-6 px-2 py-1 text-center rounded border text-xs ${(!amazonFilters || fieldsDisabled)
-                    ? 'bg-gray-300 text-gray-500 cursor-not-allowed'
-                    : 'bg-white text-black focus:outline-none focus:border-blue-500'
+                  placeholder="0"
+                  className={`w-14 h-8 px-2 py-1 text-center rounded-lg border text-xs transition-all ${(!amazonFilters || fieldsDisabled)
+                    ? 'bg-white/5 text-white/30 border-white/5 cursor-not-allowed'
+                    : 'bg-black/20 text-white border-white/15 hover:border-white/30 focus:outline-none focus:border-[#F3940B]'
                     }`}
                 />
-                <span className={`text-sm ${!amazonFilters ? 'text-gray-400' : ''}`}>MAX</span>
+                <span className={`text-xs ${!amazonFilters ? 'text-gray-500' : 'text-gray-400'}`}>MAX</span>
                 <input
                   type="text"
                   value={priceMax}
                   onChange={(e) => setPriceMax(Number(e.target.value) || 0)}
                   disabled={!amazonFilters || fieldsDisabled}
-                  className={`w-12 h-6 px-2 py-1 text-center rounded border text-xs ${(!amazonFilters || fieldsDisabled)
-                    ? 'bg-gray-300 text-gray-500 cursor-not-allowed'
-                    : 'bg-white text-black focus:outline-none focus:border-blue-500'
+                  placeholder="0"
+                  className={`w-14 h-8 px-2 py-1 text-center rounded-lg border text-xs transition-all ${(!amazonFilters || fieldsDisabled)
+                    ? 'bg-white/5 text-white/30 border-white/5 cursor-not-allowed'
+                    : 'bg-black/20 text-white border-white/15 hover:border-white/30 focus:outline-none focus:border-[#F3940B]'
                     }`}
                 />
               </div>
@@ -3551,26 +3541,28 @@ const Dashboard = () => {
             <div className="flex items-center gap-3">
               <span className={`text-xs font-bold tracking-widest uppercase ${!amazonFilters ? 'text-gray-500' : 'text-gray-300'}`}>REVIEWS</span>
               <div className="flex items-center gap-2">
-                <span className={`text-sm ${!amazonFilters ? 'text-gray-400' : ''}`}>MIN</span>
+                <span className={`text-xs ${!amazonFilters ? 'text-gray-500' : 'text-gray-400'}`}>MIN</span>
                 <input
                   type="text"
                   value={reviewsMin}
                   onChange={(e) => setReviewsMin(Number(e.target.value) || 0)}
                   disabled={!amazonFilters || fieldsDisabled}
-                  className={`w-12 h-6 px-2 py-1 text-center rounded border text-xs ${(!amazonFilters || fieldsDisabled)
-                    ? 'bg-gray-300 text-gray-500 cursor-not-allowed'
-                    : 'bg-white text-black focus:outline-none focus:border-blue-500'
+                  placeholder="0"
+                  className={`w-14 h-8 px-2 py-1 text-center rounded-lg border text-xs transition-all ${(!amazonFilters || fieldsDisabled)
+                    ? 'bg-white/5 text-white/30 border-white/5 cursor-not-allowed'
+                    : 'bg-black/20 text-white border-white/15 hover:border-white/30 focus:outline-none focus:border-[#F3940B]'
                     }`}
                 />
-                <span className={`text-sm ${!amazonFilters ? 'text-gray-400' : ''}`}>MAX</span>
+                <span className={`text-xs ${!amazonFilters ? 'text-gray-500' : 'text-gray-400'}`}>MAX</span>
                 <input
                   type="text"
                   value={reviewsMax}
                   onChange={(e) => setReviewsMax(Number(e.target.value) || 0)}
                   disabled={!amazonFilters || fieldsDisabled}
-                  className={`w-12 h-6 px-2 py-1 text-center rounded border text-xs ${(!amazonFilters || fieldsDisabled)
-                    ? 'bg-gray-300 text-gray-500 cursor-not-allowed'
-                    : 'bg-white text-black focus:outline-none focus:border-blue-500'
+                  placeholder="0"
+                  className={`w-14 h-8 px-2 py-1 text-center rounded-lg border text-xs transition-all ${(!amazonFilters || fieldsDisabled)
+                    ? 'bg-white/5 text-white/30 border-white/5 cursor-not-allowed'
+                    : 'bg-black/20 text-white border-white/15 hover:border-white/30 focus:outline-none focus:border-[#F3940B]'
                     }`}
                 />
               </div>
@@ -3589,13 +3581,11 @@ const Dashboard = () => {
                           ? 'Click to clear'
                           : `${star}★ and above`
                     }
-                    className={`text-lg ${
-                      !amazonFilters
-                        ? 'text-gray-500'
-                        : `${fieldsDisabled ? 'cursor-not-allowed' : 'cursor-pointer'} ${
-                            star <= ratingFilter ? 'text-yellow-400' : 'text-gray-500'
-                          }`
-                    }`}
+                    className={`text-lg ${!amazonFilters
+                      ? 'text-gray-500'
+                      : `${fieldsDisabled ? 'cursor-not-allowed' : 'cursor-pointer'} ${star <= ratingFilter ? 'text-yellow-400' : 'text-gray-500'
+                      }`
+                      }`}
                     onClick={(amazonFilters && !fieldsDisabled) ? () => setRatingFilter(star === ratingFilter ? 0 : star) : undefined}
                   >
                     ★
@@ -3607,11 +3597,10 @@ const Dashboard = () => {
                   type="button"
                   onClick={() => !fieldsDisabled && setRatingFilter(0)}
                   disabled={fieldsDisabled}
-                  className={`text-xs underline ml-1 ${
-                    fieldsDisabled
-                      ? 'text-yellow-400/80 cursor-not-allowed'
-                      : 'text-gray-300 hover:text-white'
-                  }`}
+                  className={`text-xs underline ml-1 ${fieldsDisabled
+                    ? 'text-yellow-400/80 cursor-not-allowed'
+                    : 'text-gray-300 hover:text-white'
+                    }`}
                   title={fieldsDisabled ? 'Rating filter locked during search' : 'Clear rating filter'}
                 >
                   {fieldsDisabled ? `${ratingFilter}★+ applied` : '✕ Clear'}
@@ -3621,7 +3610,7 @@ const Dashboard = () => {
 
             <div className="flex items-center gap-3">
               <span className={`text-xs font-bold tracking-widest uppercase ${!amazonFilters ? 'text-gray-500' : 'text-gray-300'}`}>FCL</span>
-              <div className={`px-3 py-1 flex items-center gap-2 ${!amazonFilters ? 'bg-gray-300' : 'bg-white'}`}>
+              <div className={`px-3 py-1.5 flex items-center gap-2 border border-white/10 rounded-lg ${!amazonFilters ? 'bg-white/5 opacity-50' : 'bg-black/25'}`}>
                 <input
                   type="range"
                   min="0"
@@ -3630,40 +3619,14 @@ const Dashboard = () => {
                   value={fcl}
                   onChange={(e) => setFcl(Number(e.target.value))}
                   disabled={!amazonFilters || fieldsDisabled}
-                  className={`w-20 h-2 bg-gray-300 rounded-lg appearance-none ${(!amazonFilters || fieldsDisabled) ? 'cursor-not-allowed' : 'cursor-pointer'
-                    }`}
+                  className={`w-20 h-1 rounded-lg appearance-none ${(!amazonFilters || fieldsDisabled) ? 'cursor-not-allowed' : 'cursor-pointer'}`}
                   style={amazonFilters ? {
-                    background: `linear-gradient(to right, #1e40af 0%, #1e40af ${fcl * 100}%, #d1d5db ${fcl * 100}%, #d1d5db 100%)`,
+                    background: `linear-gradient(to right, #F3940B 0%, #F3940B ${fcl * 100}%, rgba(255,255,255,0.1) ${fcl * 100}%, rgba(255,255,255,0.1) 100%)`,
                     WebkitAppearance: 'none',
                     outline: 'none'
                   } : {}}
                 />
-                <span className={`text-xs font-medium min-w-[2.5rem] ${!amazonFilters ? 'text-gray-500' : 'text-gray-800'
-                  }`}>{fcl.toFixed(2)}</span>
-                {amazonFilters && (
-                  <style jsx>{`
-                    input[type="range"]::-webkit-slider-thumb {
-                      appearance: none;
-                      width: 12px;
-                      height: 12px;
-                      border-radius: 50%;
-                      background: #1e40af;
-                      cursor: pointer;
-                      border: none;
-                      box-shadow: 0 2px 4px rgba(0,0,0,0.2);
-                    }
-                    
-                    input[type="range"]::-moz-range-thumb {
-                      width: 12px;
-                      height: 12px;
-                      border-radius: 50%;
-                      background: #1e40af;
-                      cursor: pointer;
-                      border: none;
-                      box-shadow: 0 2px 4px rgba(0,0,0,0.2);
-                    }
-                  `}</style>
-                )}
+                <span className={`text-xs font-semibold min-w-[2.5rem] text-right ${!amazonFilters ? 'text-gray-500' : 'text-white'}`}>{fcl.toFixed(2)}</span>
               </div>
             </div>
           </div>
@@ -3690,7 +3653,7 @@ const Dashboard = () => {
           <div className={`px-6 pt-2 pb-5 flex flex-wrap items-center gap-6 lg:gap-10 ${!alibabaFilters ? 'opacity-40 pointer-events-none' : ''}`}>
             <div className="flex items-center gap-3">
               <span className={`text-xs font-bold tracking-widest uppercase ${!alibabaFilters ? 'text-gray-500' : 'text-gray-300'}`}>COST BELOW %</span>
-              <div className={`px-3 py-1 flex items-center gap-2 ${!alibabaFilters ? 'bg-gray-300' : 'bg-white'}`}>
+              <div className={`px-3 py-1.5 flex items-center gap-2 border border-white/10 rounded-lg ${!alibabaFilters ? 'bg-white/5 opacity-50' : 'bg-black/25'}`}>
                 <input
                   type="range"
                   min="0"
@@ -3699,40 +3662,14 @@ const Dashboard = () => {
                   value={costBelow}
                   onChange={(e) => setCostBelow(Number(e.target.value))}
                   disabled={!alibabaFilters || fieldsDisabled}
-                  className={`w-20 h-2 bg-gray-300 rounded-lg appearance-none ${(!alibabaFilters || fieldsDisabled) ? 'cursor-not-allowed' : 'cursor-pointer'
-                    }`}
+                  className={`w-20 h-1 rounded-lg appearance-none ${(!alibabaFilters || fieldsDisabled) ? 'cursor-not-allowed' : 'cursor-pointer'}`}
                   style={alibabaFilters ? {
-                    background: `linear-gradient(to right, #1e40af 0%, #1e40af ${costBelow * 100}%, #d1d5db ${costBelow * 100}%, #d1d5db 100%)`,
+                    background: `linear-gradient(to right, #3b82f6 0%, #3b82f6 ${costBelow * 100}%, rgba(255,255,255,0.1) ${costBelow * 100}%, rgba(255,255,255,0.1) 100%)`,
                     WebkitAppearance: 'none',
                     outline: 'none'
                   } : {}}
                 />
-                <span className={`text-xs font-medium min-w-[2.5rem] ${!alibabaFilters ? 'text-gray-500' : 'text-gray-800'
-                  }`}>{costBelow.toFixed(2)}</span>
-                {alibabaFilters && (
-                  <style jsx>{`
-                    input[type="range"]::-webkit-slider-thumb {
-                      appearance: none;
-                      width: 12px;
-                      height: 12px;
-                      border-radius: 50%;
-                      background: #1e40af;
-                      cursor: pointer;
-                      border: none;
-                      box-shadow: 0 2px 4px rgba(0,0,0,0.2);
-                    }
-                    
-                    input[type="range"]::-moz-range-thumb {
-                      width: 12px;
-                      height: 12px;
-                      border-radius: 50%;
-                      background: #1e40af;
-                      cursor: pointer;
-                      border: none;
-                      box-shadow: 0 2px 4px rgba(0,0,0,0.2);
-                    }
-                  `}</style>
-                )}
+                <span className={`text-xs font-semibold min-w-[2.5rem] text-right ${!alibabaFilters ? 'text-gray-500' : 'text-white'}`}>{costBelow.toFixed(2)}</span>
               </div>
             </div>
 
@@ -3743,9 +3680,10 @@ const Dashboard = () => {
                 value={moq}
                 onChange={(e) => setMoq(e.target.value)}
                 disabled={!alibabaFilters || fieldsDisabled}
-                className={`w-24 h-6 px-2 py-1 text-center border text-xs ${(!alibabaFilters || fieldsDisabled)
-                  ? 'text-gray-500 bg-gray-300 cursor-not-allowed'
-                  : 'text-black bg-white focus:outline-none focus:border-blue-500'
+                placeholder="e.g. 10"
+                className={`w-20 h-8 px-2 py-1 text-center rounded-lg border text-xs transition-all ${(!alibabaFilters || fieldsDisabled)
+                  ? 'bg-white/5 text-white/30 border-white/5 cursor-not-allowed'
+                  : 'bg-black/20 text-white border-white/15 hover:border-white/30 focus:outline-none focus:border-blue-400'
                   }`}
               />
             </div>
@@ -3763,13 +3701,11 @@ const Dashboard = () => {
                           ? 'Click to clear'
                           : `${star}★ and above`
                     }
-                    className={`text-lg ${
-                      !alibabaFilters
-                        ? 'text-gray-500'
-                        : `${fieldsDisabled ? 'cursor-not-allowed' : 'cursor-pointer'} ${
-                            star <= alibabaRating ? 'text-yellow-400' : 'text-gray-500'
-                          }`
-                    }`}
+                    className={`text-lg ${!alibabaFilters
+                      ? 'text-gray-500'
+                      : `${fieldsDisabled ? 'cursor-not-allowed' : 'cursor-pointer'} ${star <= alibabaRating ? 'text-yellow-400' : 'text-gray-500'
+                      }`
+                      }`}
                     onClick={(alibabaFilters && !fieldsDisabled) ? () => setAlibabaRating(star === alibabaRating ? 0 : star) : undefined}
                   >
                     ★
@@ -3781,11 +3717,10 @@ const Dashboard = () => {
                   type="button"
                   onClick={() => !fieldsDisabled && setAlibabaRating(0)}
                   disabled={fieldsDisabled}
-                  className={`text-xs underline ml-1 ${
-                    fieldsDisabled
-                      ? 'text-yellow-400/80 cursor-not-allowed'
-                      : 'text-gray-300 hover:text-white'
-                  }`}
+                  className={`text-xs underline ml-1 ${fieldsDisabled
+                    ? 'text-yellow-400/80 cursor-not-allowed'
+                    : 'text-gray-300 hover:text-white'
+                    }`}
                   title={fieldsDisabled ? 'Rating filter locked during search' : 'Clear rating filter'}
                 >
                   {fieldsDisabled ? `${alibabaRating}★+ applied` : '✕ Clear'}
@@ -4250,70 +4185,69 @@ const Dashboard = () => {
                   !isActiveRun &&
                   allPlannerKeywords.length > 0 &&
                   batchProcessedCount < allPlannerKeywords.length && (
-                  <div className="mt-6 p-5 rounded-2xl bg-gradient-to-br from-[#1a2318]/80 to-[#243022]/80 border border-[#C0FE72]/30 backdrop-blur-sm shadow-xl">
-                    <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
-                      <div>
-                        <h3 className="text-base font-bold text-[#C0FE72] tracking-wide flex items-center gap-2">
-                          <svg className="w-4 h-4" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24">
-                            <path strokeLinecap="round" strokeLinejoin="round" d="M9 5l7 7-7 7" />
-                          </svg>
-                          MORE KEYWORDS AVAILABLE
-                        </h3>
-                        <p className="text-xs text-gray-400 mt-1">
-                          Processed{' '}
-                          <strong className="text-gray-200">{batchProcessedCount}</strong>
-                          {' '}of{' '}
-                          <strong className="text-[#C0FE72]">{allPlannerKeywords.length}</strong>
-                          {' '}fetched keywords &mdash;{' '}
-                          <strong className="text-gray-200">
-                            {allPlannerKeywords.length - batchProcessedCount}
-                          </strong>
-                          {' '}remaining. Consolidated table will grow with each batch.
-                        </p>
-                      </div>
-                      <button
-                        id="next-batch-btn"
-                        onClick={handleNextBatch}
-                        disabled={nextBatchProcessing}
-                        className={`flex-shrink-0 flex items-center gap-2.5 px-6 py-3 rounded-xl font-bold text-sm tracking-wide transition-all shadow-lg ${
-                          nextBatchProcessing
+                    <div className="mt-6 p-5 rounded-2xl bg-gradient-to-br from-[#1a2318]/80 to-[#243022]/80 border border-[#C0FE72]/30 backdrop-blur-sm shadow-xl">
+                      <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
+                        <div>
+                          <h3 className="text-base font-bold text-[#C0FE72] tracking-wide flex items-center gap-2">
+                            <svg className="w-4 h-4" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24">
+                              <path strokeLinecap="round" strokeLinejoin="round" d="M9 5l7 7-7 7" />
+                            </svg>
+                            MORE KEYWORDS AVAILABLE
+                          </h3>
+                          <p className="text-xs text-gray-400 mt-1">
+                            Processed{' '}
+                            <strong className="text-gray-200">{batchProcessedCount}</strong>
+                            {' '}of{' '}
+                            <strong className="text-[#C0FE72]">{allPlannerKeywords.length}</strong>
+                            {' '}fetched keywords &mdash;{' '}
+                            <strong className="text-gray-200">
+                              {allPlannerKeywords.length - batchProcessedCount}
+                            </strong>
+                            {' '}remaining. Consolidated table will grow with each batch.
+                          </p>
+                        </div>
+                        <button
+                          id="next-batch-btn"
+                          onClick={handleNextBatch}
+                          disabled={nextBatchProcessing}
+                          className={`flex-shrink-0 flex items-center gap-2.5 px-6 py-3 rounded-xl font-bold text-sm tracking-wide transition-all shadow-lg ${nextBatchProcessing
                             ? 'bg-gray-700/60 text-gray-400 cursor-not-allowed border border-white/10'
                             : 'bg-[#C0FE72] text-black hover:bg-[#d4ff8c] active:scale-95 shadow-[#C0FE72]/20'
-                        }`}
-                      >
-                        {nextBatchProcessing ? (
-                          <>
-                            <svg className="w-4 h-4 animate-spin" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24">
-                              <path strokeLinecap="round" strokeLinejoin="round" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
-                            </svg>
-                            PROCESSING...
-                          </>
-                        ) : (
-                          <>
-                            <svg className="w-4 h-4" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24">
-                              <path strokeLinecap="round" strokeLinejoin="round" d="M13 5l7 7-7 7M5 5l7 7-7 7" />
-                            </svg>
-                            PROCESS NEXT {Math.min(30, allPlannerKeywords.length - batchProcessedCount)} KEYWORDS
-                          </>
-                        )}
-                      </button>
-                    </div>
+                            }`}
+                        >
+                          {nextBatchProcessing ? (
+                            <>
+                              <svg className="w-4 h-4 animate-spin" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24">
+                                <path strokeLinecap="round" strokeLinejoin="round" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
+                              </svg>
+                              PROCESSING...
+                            </>
+                          ) : (
+                            <>
+                              <svg className="w-4 h-4" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24">
+                                <path strokeLinecap="round" strokeLinejoin="round" d="M13 5l7 7-7 7M5 5l7 7-7 7" />
+                              </svg>
+                              PROCESS NEXT {Math.min(30, allPlannerKeywords.length - batchProcessedCount)} KEYWORDS
+                            </>
+                          )}
+                        </button>
+                      </div>
 
-                    {/* Progress bar */}
-                    <div className="mt-4">
-                      <div className="flex items-center justify-between text-[10px] text-gray-500 mb-1">
-                        <span>Batch progress</span>
-                        <span>{Math.round((batchProcessedCount / allPlannerKeywords.length) * 100)}%</span>
-                      </div>
-                      <div className="w-full h-1.5 bg-white/10 rounded-full overflow-hidden">
-                        <div
-                          className="h-full bg-[#C0FE72] rounded-full transition-all duration-500"
-                          style={{ width: `${Math.round((batchProcessedCount / allPlannerKeywords.length) * 100)}%` }}
-                        />
+                      {/* Progress bar */}
+                      <div className="mt-4">
+                        <div className="flex items-center justify-between text-[10px] text-gray-500 mb-1">
+                          <span>Batch progress</span>
+                          <span>{Math.round((batchProcessedCount / allPlannerKeywords.length) * 100)}%</span>
+                        </div>
+                        <div className="w-full h-1.5 bg-white/10 rounded-full overflow-hidden">
+                          <div
+                            className="h-full bg-[#C0FE72] rounded-full transition-all duration-500"
+                            style={{ width: `${Math.round((batchProcessedCount / allPlannerKeywords.length) * 100)}%` }}
+                          />
+                        </div>
                       </div>
                     </div>
-                  </div>
-                )}
+                  )}
 
               </div>
             )}
@@ -4326,17 +4260,17 @@ const Dashboard = () => {
               displayedConsolidatedResults.length === 0 &&
               hasLoadedKeywordPlanner &&
               (keywordPlannerResults?.length ?? 0) > 0 && (
-              <div className="mt-6 mb-10 p-6 bg-[#2a3627] rounded border border-orange-400/40 text-center">
-                <div className="text-4xl mb-3">📈</div>
-                <p className="text-lg font-bold text-orange-300 mb-2">
-                  No keywords met Google Trend score ≥ {googleTrendScore}
-                </p>
-                <p className="text-sm text-gray-400 max-w-lg mx-auto">
-                  Keyword Planner returned results, but none had a GT Avg at or above your threshold. Lower the{' '}
-                  <strong className="text-white">Google Trend Score</strong> slider (or set it to 0 to show all) and search again.
-                </p>
-              </div>
-            )}
+                <div className="mt-6 mb-10 p-6 bg-[#2a3627] rounded border border-orange-400/40 text-center">
+                  <div className="text-4xl mb-3">📈</div>
+                  <p className="text-lg font-bold text-orange-300 mb-2">
+                    No keywords met Google Trend score ≥ {googleTrendScore}
+                  </p>
+                  <p className="text-sm text-gray-400 max-w-lg mx-auto">
+                    Keyword Planner returned results, but none had a GT Avg at or above your threshold. Lower the{' '}
+                    <strong className="text-white">Google Trend Score</strong> slider (or set it to 0 to show all) and search again.
+                  </p>
+                </div>
+              )}
 
             {/* ── NO DATA PASSED FILTERS – empty state after pipeline completes ── */}
             {pipelineStatus === 'COMPLETED' && !isLoading && consolidatedResults.length === 0 && hasLoadedKeywordPlanner && (!keywordPlannerResults || keywordPlannerResults.length === 0) && (
@@ -4423,12 +4357,12 @@ const Dashboard = () => {
                             const badge = getPipelineStatusBadgeClasses(pipelineHealth);
                             const message = exec.pipeline_summary
                               ? getPipelineUserMessage({
-                                  pipelineStatus: exec.pipeline_summary.pipeline_status,
-                                  stages: exec.pipeline_summary.stages,
-                                  amazonFilters,
-                                  alibabaFilters,
-                                  displayStatus: pipelineHealth,
-                                })
+                                pipelineStatus: exec.pipeline_summary.pipeline_status,
+                                stages: exec.pipeline_summary.stages,
+                                amazonFilters,
+                                alibabaFilters,
+                                displayStatus: pipelineHealth,
+                              })
                               : pipelineHealth === 'RUNNING' && isTerminalAwsStatus(exec.status)
                                 ? 'Finalizing pipeline results...'
                                 : pipelineHealth === 'RUNNING'
@@ -4438,19 +4372,19 @@ const Dashboard = () => {
                                     : '—';
 
                             return (
-                            <tr key={idx} className="border-b border-white/10 hover:bg-white/5 transition-colors">
-                              <td className="py-4 pr-4 font-medium text-white">{exec.keyword}</td>
-                              <td className="py-4 px-4">
-                                <span className={`inline-flex items-center px-3 py-1 rounded-full text-xs font-bold tracking-tight shadow-sm ${badge.badge}`}>
-                                  <span className={`w-2 h-2 rounded-full mr-2 ${badge.dot} ${badge.pulse ? 'animate-pulse' : ''}`}></span>
-                                  {pipelineHealth}
-                                </span>
-                              </td>
-                              <td className="py-4 px-4 text-xs text-gray-300 min-w-[280px] max-w-xl">
-                                <span className="block break-words whitespace-normal leading-relaxed">{message}</span>
-                              </td>
-                              <td className="py-4 pl-4 font-mono text-[10px] text-gray-500 break-all max-w-xs">{exec.run_id || exec.execution_arn}</td>
-                            </tr>
+                              <tr key={idx} className="border-b border-white/10 hover:bg-white/5 transition-colors">
+                                <td className="py-4 pr-4 font-medium text-white">{exec.keyword}</td>
+                                <td className="py-4 px-4">
+                                  <span className={`inline-flex items-center px-3 py-1 rounded-full text-xs font-bold tracking-tight shadow-sm ${badge.badge}`}>
+                                    <span className={`w-2 h-2 rounded-full mr-2 ${badge.dot} ${badge.pulse ? 'animate-pulse' : ''}`}></span>
+                                    {pipelineHealth}
+                                  </span>
+                                </td>
+                                <td className="py-4 px-4 text-xs text-gray-300 min-w-[280px] max-w-xl">
+                                  <span className="block break-words whitespace-normal leading-relaxed">{message}</span>
+                                </td>
+                                <td className="py-4 pl-4 font-mono text-[10px] text-gray-500 break-all max-w-xs">{exec.run_id || exec.execution_arn}</td>
+                              </tr>
                             );
                           })}
                         </tbody>
@@ -4696,6 +4630,11 @@ const Dashboard = () => {
                   }
                   const displayRows = filterStageRowsByVariant(alibabaResults, ['keyword', 'search_category'], 'keyword');
                   if (!displayRows || displayRows.length === 0) return null;
+                  
+                  // Columns to exclude from the UI table
+                  const excludedCols = ['category', 'weight_kg', 'ships_to_sv', 'availability_status'];
+                  const colsToRender = Object.keys(displayRows[0]).filter(col => !excludedCols.includes(col));
+
                   return (
                     <div className="mb-8 p-6 bg-[#2a3627] rounded shadow-xl border border-white/10">
                       <div className="flex justify-between items-center mb-4">
@@ -4708,7 +4647,7 @@ const Dashboard = () => {
                         <table className="w-full text-sm text-left border-collapse">
                           <thead>
                             <tr className="border-b border-white/30 text-gray-300">
-                              {Object.keys(displayRows[0]).map((col) => (
+                              {colsToRender.map((col) => (
                                 <th key={col} className="pb-3 pr-4 font-semibold uppercase tracking-wider whitespace-nowrap">
                                   {col.replace(/_/g, ' ')}
                                 </th>
@@ -4718,13 +4657,28 @@ const Dashboard = () => {
                           <tbody>
                             {displayRows.map((row, idx) => (
                               <tr key={idx} className="border-b border-white/10 hover:bg-white/5 transition-colors">
-                                {Object.keys(displayRows[0]).map((col) => (
-                                  <td key={col} className="py-2 pr-4 text-gray-100 whitespace-nowrap">
-                                    {(row as any)[col] !== undefined && (row as any)[col] !== null
-                                      ? String((row as any)[col])
-                                      : '-'}
-                                  </td>
-                                ))}
+                                {colsToRender.map((col) => {
+                                  const val = (row as any)[col];
+                                  const isLink = (col === 'supplier_link' || col === 'product_link') && val;
+                                  return (
+                                    <td key={col} className="py-2 pr-4 text-gray-100 whitespace-nowrap">
+                                      {isLink ? (
+                                        <a
+                                          href={String(val)}
+                                          target="_blank"
+                                          rel="noopener noreferrer"
+                                          className="text-blue-400 hover:text-blue-300 hover:underline transition-all"
+                                        >
+                                          {String(val)}
+                                        </a>
+                                      ) : val !== undefined && val !== null ? (
+                                        String(val)
+                                      ) : (
+                                        '-'
+                                      )}
+                                    </td>
+                                  );
+                                })}
                               </tr>
                             ))}
                           </tbody>

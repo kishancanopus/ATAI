@@ -39,13 +39,29 @@ yarn-error.log*
 # typescript
 *.tsbuildinfo
 next-env.d.ts
-
 src.zip
 
-data   
-data/presets.json
+# Local data & environment presets
+/data/
 
-# Application logs (date-stamped & PM2 logs) - keep folder, ignore log files
-logs/*.log
-aws_functions/venv
-.vscode
+# Application logs (date-stamped & PM2 logs)
+/logs/
+*.log
+
+# Python virtual environment and local caching
+aws_functions/venv/
+aws_functions/.venv/
+**/__pycache__/
+**/*.pyc
+
+# IDEs & Editors
+.vscode/
+.idea/
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.swp
+
+# Build and local builds
+tsconfig.tsbuildinfo
