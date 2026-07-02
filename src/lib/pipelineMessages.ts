@@ -71,6 +71,13 @@ function applyKnownErrorPatterns(text: string): string | null {
   if (lower.includes('no keyword planner data')) {
     return 'No Keyword Planner data returned';
   }
+  // Check specific "filtered out" variants before the generic catch-alls
+  if (lower.includes('no alibaba products remained after filtering') || lower.includes('alibaba') && lower.includes('after filtering')) {
+    return 'Alibaba products fetched but all were removed by your active filters';
+  }
+  if (lower.includes('no amazon products') && lower.includes('after')) {
+    return 'Amazon products fetched but all were removed by your active filters';
+  }
   if (lower.includes('no amazon products')) {
     return 'No Amazon products found';
   }
@@ -141,6 +148,19 @@ function stageFailures(stages: Record<string, StageMessageSource | undefined> | 
   });
 }
 
+/** Separate EMPTY stages (filtered out) from genuinely FAILED stages */
+function stageEmpties(stages: Record<string, StageMessageSource | undefined> | undefined) {
+  return Object.entries(stages ?? {}).filter(([, s]) => {
+    return String(s?.status ?? '').toUpperCase() === 'EMPTY';
+  });
+}
+
+function stageHardFailures(stages: Record<string, StageMessageSource | undefined> | undefined) {
+  return Object.entries(stages ?? {}).filter(([, s]) => {
+    return String(s?.status ?? '').toUpperCase() === 'FAILED';
+  });
+}
+
 function disabledMarketplaceLabels(
   amazonFilters: boolean,
   alibabaFilters: boolean,
@@ -166,23 +186,38 @@ export function getPipelineUserMessage(ctx: PipelineUserMessageContext): string 
 
   const effective = displayStatus ?? pipelineStatus;
   const failed = stageFailures(stages);
+  const hardFailed = stageHardFailures(stages);
+  const emptied = stageEmpties(stages);
 
-  if (effective === 'RUNNING') return 'Pipeline in progress…';
-  if (effective === 'PENDING') return 'Waiting to start…';
+  if (effective === 'RUNNING') return 'Pipeline in progress\u2026';
+  if (effective === 'PENDING') return 'Waiting to start\u2026';
 
   if (effective === 'FAILED') {
+    if (hardFailed.length > 0) {
+      const [key, s] = hardFailed[0];
+      const label = STAGE_LABELS[key] ?? key.replace(/_/g, ' ');
+      return `${label} failed \u2014 ${resolveStageMessage(s, 'see stage card for details')}`;
+    }
     if (failed.length > 0) {
       const [key, s] = failed[0];
       const label = STAGE_LABELS[key] ?? key.replace(/_/g, ' ');
-      return `${label} failed — ${resolveStageMessage(s, 'see stage card for details')}`;
+      return `${label} failed \u2014 ${resolveStageMessage(s, 'see stage card for details')}`;
     }
     return 'Pipeline execution failed';
   }
 
-  if (failed.length > 0) {
-    const [key, s] = failed[0];
+  // Hard failures take priority over EMPTY in the banner message
+  if (hardFailed.length > 0) {
+    const [key, s] = hardFailed[0];
     const label = STAGE_LABELS[key] ?? key.replace(/_/g, ' ');
-    return `Core data collected — ${label} failed: ${resolveStageMessage(s, 'see details below')}`;
+    return `Core data collected \u2014 ${label} failed: ${resolveStageMessage(s, 'see details below')}`;
+  }
+
+  // EMPTY stages = products were fetched but filtered out — distinct from a hard failure
+  if (emptied.length > 0) {
+    const [key] = emptied[0];
+    const label = STAGE_LABELS[key] ?? key.replace(/_/g, ' ');
+    return `Core data collected \u2014 ${label} results removed by active filters`;
   }
 
   if (effective === 'SUCCEEDED') {
@@ -196,9 +231,9 @@ export function getPipelineUserMessage(ctx: PipelineUserMessageContext): string 
     const disabled = disabledMarketplaceLabels(amazonFilters, alibabaFilters, stages);
     if (disabled.length > 0) {
       if (disabled.length === 2) {
-        return 'Keyword and trend data collected — marketplace stages not enabled';
+        return 'Keyword and trend data collected \u2014 marketplace stages not enabled';
       }
-      return `Keyword and trend data collected — ${disabled[0]} not enabled`;
+      return `Keyword and trend data collected \u2014 ${disabled[0]} not enabled`;
     }
     return 'Completed with some optional stages skipped';
   }

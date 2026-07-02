@@ -119,21 +119,21 @@ async function buildInputAndStartExecution(
     const search_volume_max = filters.search_volume_max != null ? Number(filters.search_volume_max) : 0;
     const google_trend_score = filters.google_trend_score != null ? Number(filters.google_trend_score) : 0;
 
-    const amz_price_min = filters.amz_price_min != null ? Number(filters.amz_price_min) : 0;
-    const amz_price_max = filters.amz_price_max != null ? Number(filters.amz_price_max) : 999999;
-    const reviews_min = filters.reviews_min != null ? Number(filters.reviews_min) : 0;
-    const reviews_max = filters.reviews_max != null ? Number(filters.reviews_max) : 999999;
-    const rating_min = filters.rating_min != null ? Number(filters.rating_min) : 0;
-    const fcl_min = filters.fcl_min != null ? Number(filters.fcl_min) : 0;
-    const fcl_max = filters.fcl_max != null ? Number(filters.fcl_max) : 999999;
+    const amz_price_min = filters.amz_price_min != null && Number(filters.amz_price_min) > 0 ? Number(filters.amz_price_min) : null;
+    const amz_price_max = filters.amz_price_max != null && Number(filters.amz_price_max) > 0 && Number(filters.amz_price_max) < 999999 ? Number(filters.amz_price_max) : null;
+    const reviews_min = filters.reviews_min != null && Number(filters.reviews_min) > 0 ? Number(filters.reviews_min) : null;
+    const reviews_max = filters.reviews_max != null && Number(filters.reviews_max) > 0 && Number(filters.reviews_max) < 999999 ? Number(filters.reviews_max) : null;
+    const rating_min = filters.rating_min != null && Number(filters.rating_min) > 0 ? Number(filters.rating_min) : null;
+    const fcl_min = filters.fcl_min != null && Number(filters.fcl_min) > 0 ? Number(filters.fcl_min) : null;
+    const fcl_max = filters.fcl_max != null && Number(filters.fcl_max) > 0 && Number(filters.fcl_max) < 999999 ? Number(filters.fcl_max) : null;
 
-    const margin_min = filters.margin_min != null ? Number(filters.margin_min) : 0;
+    const margin_min = filters.margin_min != null && Number(filters.margin_min) > 0 ? Number(filters.margin_min) : null;
     const moq_max =
       filters.moq_max != null && Number(filters.moq_max) > 0
         ? ensureInt(filters.moq_max, 0)
-        : 0;
-    const supplier_rating_min = filters.supplier_rating_min != null ? Number(filters.supplier_rating_min) : 0;
-    const verified_supplier = !!filters.verified_supplier;
+        : null;
+    const supplier_rating_min = filters.supplier_rating_min != null && Number(filters.supplier_rating_min) > 0 ? Number(filters.supplier_rating_min) : null;
+    const verified_supplier = filters.verified_supplier ? true : null;
 
     // Derive a human-readable prefix from the search mode
     const modePrefix =

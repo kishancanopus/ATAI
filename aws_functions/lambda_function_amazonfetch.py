@@ -268,25 +268,19 @@ def lambda_handler(event, context):
             raise ValueError("Missing required field: keyword")
         execution_timestamp = event.get("timestamp")
         country = event.get("country", "US")
-        size = safe_int(event.get("size", 10))
-
-        if size == 0:
-            size = 25
-            # print("[Lambda] Size is 0, skipping Apify call.")
-            # payload = {
-            #     "keyword": keyword,
-            #     "country": country,
-            #     "items": []
-            # }
-            # s3_key = save_raw_to_s3("size-zero-skip", payload, execution_timestamp, actor_id=ACTOR_ID)
-            # return {
-            #     "status": "SUCCESS",
-            #     "message": "Result cap is 0, skipping Apify call",
-            #     "itemCount": 0,
-            #     "s3_bucket": S3_RAW_BUCKET,
-            #     "s3_key": s3_key
-            # }
-
+        
+        # INCREASE POOL SIZE (Problem 1 Requirement 4):
+        # We ensure a minimum fetch size of 25 (or larger, as requested in size)
+        # to ensure that the candidate pool is sufficiently large for common queries.
+        req_size = safe_int(event.get("size", 10))
+        # If the user explicitly provides a positive cap, honour it exactly.
+        # If size is 0 / unset (no cap), use a minimum fetch pool of 25 so the
+        # downstream matcher has enough candidates to work with.
+        if req_size is None or req_size <= 0:
+            size = 25  # open-ended: fetch generous pool
+        else:
+            size = req_size  # respect the user's explicit cap
+        
         # 1) Start Apify actor (60s wait to fit timeout)
         run_resp = start_apify_actor(keyword, country, size, wait_seconds=60)
         run_data = run_resp.get("data") or run_resp
@@ -349,23 +343,12 @@ def lambda_handler(event, context):
             print("[Lambda] No organic items found; falling back to all items.")
             organic_items = items
 
-        # Cap results to requested size (applied here to final processed list)
-        # if size > 0:
-        #      organic_items = organic_items[:size]
-
-        # cleaned_items = transform_items(organic_items)
-
-        # ---------------------------------------------------
         # Relevance Ranking Layer
-        # ---------------------------------------------------
-
         scored_items = []
 
         for item in organic_items:
             relevance_score = calculate_relevance_score(keyword, item)
-
             item["relevance_score"] = relevance_score
-
             scored_items.append(item)
 
         # Sort by highest relevance
@@ -382,10 +365,9 @@ def lambda_handler(event, context):
                 f"Title={item.get('title')}"
             )
 
-        # Final result limit
-        final_items = scored_items[:size]
-
-        cleaned_items = transform_items(final_items)
+        # Final result limit: Save the entire pool size fetched to S3 (no truncation to small size limit)
+        # so downstream matcher has the full candidate pool.
+        cleaned_items = transform_items(scored_items[:size])
         
         payload = {
             "keyword": keyword,
@@ -433,4 +415,3 @@ def lambda_handler(event, context):
             "s3_bucket": None,
             "s3_key": None
         }
-

@@ -13,8 +13,17 @@
  * - Phase A (strict): category → title → partial title → exact keyword
  * - Phase B (fallback): unused root-pool products above similarity threshold
  *
- * At each level, pick the highest-scoring organic listing
- * (reviews, rating, BSR, sales). Sponsored listings are excluded.
+ * At each level, pick the highest-confidence organic listing
+ * (reviews, rating, BSR, sales + category alignment + disqualifier checks).
+ * Sponsored listings are excluded.
+ *
+ * v2 changes:
+ *   - Marketing qualifier stripping ("Best Rice Cooker" → "Rice Cooker" for matching)
+ *   - Product-type disqualifier detection (rejects accessories/consumables matching by title tokens)
+ *   - Synonym expansion ("fridge" ↔ "refrigerator", etc.) in title + category scoring
+ *   - Confidence scoring (0–100) replaces binary accept/reject thresholds
+ *   - All candidates in a hit set evaluated; highest-confidence non-disqualified row wins
+ *   - Per-keyword diagnostic logging (always on — disable via LOG_AMAZON_MATCH_DIAGNOSTICS=false)
  */
 
 export type AmazonProductRow = Record<string, unknown>;
@@ -30,6 +39,10 @@ export type AmazonMatchType =
 export type AmazonMatchResult = {
   row: AmazonProductRow;
   matchType: AmazonMatchType;
+  /** Confidence score 0–100 (added in v2) */
+  confidence?: number;
+  /** True when accepted at fallback quality (70–89) rather than high confidence (≥90) */
+  isFallbackQuality?: boolean;
 };
 
 export type KwpSeedInput = {
@@ -39,6 +52,10 @@ export type KwpSeedInput = {
   rootKeyword: string;
   searchVolume?: number;
 };
+
+// ---------------------------------------------------------------------------
+// Constants
+// ---------------------------------------------------------------------------
 
 const CATEGORY_FIELDS = [
   'category_leaf',
@@ -69,6 +86,82 @@ const GENERIC_MATCH_TOKENS = new Set([
   'home', 'portable', 'wireless', 'smart', 'easy', 'safe', 'soft', 'cute',
 ]);
 
+/**
+ * Pure marketing / ranking qualifier tokens stripped from the search keyword
+ * *before* it enters category/title matching.
+ *
+ * Intentionally narrow — only unambiguous sentiment/ranking words.
+ * Product-spec qualifiers ("top load", "commercial", "professional") are kept
+ * because they narrow the product type.
+ */
+export const MARKETING_QUALIFIER_TOKENS = new Set([
+  'best', 'good', 'great', 'cheap', 'cheapest', 'affordable', 'budget',
+  'recommended', 'popular', 'highly', 'well',
+]);
+
+/**
+ * Words that, when present in a candidate title but absent from the (cleaned)
+ * search keyword, strongly indicate a product-type mismatch:
+ *   - accessory / consumable / replacement part for the real product
+ *   - adjacent product from a different category
+ *
+ * Applied as a −50 confidence penalty when triggered.
+ * Does NOT fire when the keyword itself contains the word (e.g. "Vacuum Cleaner",
+ * "Air Filter", "Mattress Topper", "Replacement Water Filter" are all safe).
+ */
+export const GENERIC_DISQUALIFIER_WORDS = new Set([
+  // Cleaning consumables (not cleaning appliances)
+  'cleaner', 'cleaning', 'detergent', 'descaler', 'deodorizer',
+  'disinfectant', 'sanitizer', 'wipes',
+  // Replacement parts / accessories
+  'accessory', 'accessories', 'replacement', 'spare', 'refill',
+  'cartridge', 'hose', 'brush', 'nozzle', 'attachment', 'adapter',
+  'seal', 'gasket', 'belt', 'valve',
+  // Bedding / padding adjacent to furniture
+  'mattress', 'mattresses', 'topper', 'liner', 'insert',
+  // Covers / protection items
+  'slipcover',
+  // Organization / support accessories
+  'stand', 'rack', 'mount', 'bracket', 'organizer',
+  // Paper / filter media (consumable, not appliance)
+  'pellets', 'tablets',
+  // Informational products
+  'manual', 'guide',
+]);
+
+/**
+ * Synonym pairs for token-level matching.
+ * When scoring title / category relevance, each token is also checked against
+ * its synonyms so "fridge" matches "refrigerator" in a product title.
+ * Mapping is one-directional (expand query tokens → accepted title tokens).
+ */
+export const KEYWORD_SYNONYMS: Record<string, string[]> = {
+  fridge: ['refrigerator', 'frig'],
+  frig: ['refrigerator', 'fridge'],
+  washer: ['washing machine'],
+  dryer: ['clothes dryer', 'tumble dryer'],
+  tv: ['television', 'monitor'],
+  sofa: ['couch', 'settee'],
+  couch: ['sofa', 'settee'],
+  stroller: ['pram', 'pushchair', 'baby carriage'],
+  diaper: ['nappy'],
+  nappy: ['diaper'],
+  phone: ['smartphone', 'mobile phone'],
+  cooktop: ['stovetop', 'hob'],
+  hob: ['cooktop', 'stovetop'],
+  microwave: ['microwave oven'],
+  dishwasher: ['dish washer'],
+};
+
+/** Confidence score thresholds */
+export const CONFIDENCE_ACCEPT_HIGH = 90;
+export const CONFIDENCE_ACCEPT_FALLBACK = 70;
+export const CONFIDENCE_MIN_ACCEPT = 70;
+
+// ---------------------------------------------------------------------------
+// Text utilities
+// ---------------------------------------------------------------------------
+
 function normalizeText(value: unknown): string {
   return String(value ?? '')
     .toLowerCase()
@@ -92,10 +185,29 @@ function tokenMatchesInText(token: string, text: string): boolean {
   return stemmed !== token && text.includes(stemmed);
 }
 
+/**
+ * Synonym-aware token matching.
+ * Returns true when `token` OR any of its synonyms appears in `text`.
+ */
+function tokenWithSynonymsMatchesText(token: string, text: string): boolean {
+  if (tokenMatchesInText(token, text)) return true;
+  const syns = KEYWORD_SYNONYMS[token];
+  if (!syns) return false;
+  return syns.some((syn) => {
+    // Each synonym may be a multi-word phrase (e.g. "washing machine")
+    if (text.includes(syn)) return true;
+    return syn.split(' ').every((w) => tokenMatchesInText(w, text));
+  });
+}
+
 /** Significant tokens (length > 1) for matching */
 export function tokenizeKeyword(keyword: string): string[] {
   return normalizeText(keyword).split(' ').filter((w) => w.length > 1);
 }
+
+// ---------------------------------------------------------------------------
+// Keyword cleaning pipeline
+// ---------------------------------------------------------------------------
 
 /**
  * Retailers and noise tokens stripped before category matching.
@@ -108,7 +220,7 @@ const RETAILER_NOISE_TOKENS = new Set([
   'babylist', 'buybuybaby', 'buybuy', 'carters', 'oshkosh',
   'wayfair', 'ikea', 'pottery', 'barn', 'west', 'elm', 'crate', 'barrel',
   'overstock', 'cb2', 'restoration', 'hardware',
-  'bestbuy', 'best', 'buy', 'staples', 'officedepot', 'costplus',
+  'bestbuy', 'staples', 'officedepot', 'costplus',
   'worldmarket', 'world', 'market',
   'amazon', 'ebay', 'etsy', 'chewy', 'zappos', 'jet',
   'walgreens', 'cvs', 'rite', 'aid', 'kroger', 'safeway',
@@ -122,6 +234,31 @@ export function stripRetailerNoise(keyword: string): string {
   const core = tokens.filter((w) => !RETAILER_NOISE_TOKENS.has(w));
   return core.length > 0 ? core.join(' ') : tokens.join(' ');
 }
+
+/**
+ * Strip pure marketing / ranking qualifiers from a keyword before token matching.
+ * "Best Rice Cooker" → "Rice Cooker"
+ * "Top Load Washing Machine" → unchanged ("top" is a product spec here, not marketing)
+ */
+export function stripMarketingQualifiers(keyword: string): string {
+  const tokens = tokenizeKeyword(keyword);
+  const filtered = tokens.filter((w) => !MARKETING_QUALIFIER_TOKENS.has(w));
+  // Guard: if stripping removes everything, keep original
+  return (filtered.length > 0 ? filtered : tokens).join(' ');
+}
+
+/**
+ * Full keyword cleaning pipeline for matching:
+ * stripRetailerNoise → stripMarketingQualifiers
+ * Used as the primary token set for category/title level building.
+ */
+export function cleanKeywordForMatching(keyword: string): string {
+  return stripMarketingQualifiers(stripRetailerNoise(keyword));
+}
+
+// ---------------------------------------------------------------------------
+// Category levels
+// ---------------------------------------------------------------------------
 
 /**
  * Category levels to try, most specific first.
@@ -161,6 +298,10 @@ export function buildAllMatchLevels(keyword: string): string[] {
   }
   return result;
 }
+
+// ---------------------------------------------------------------------------
+// Product row helpers
+// ---------------------------------------------------------------------------
 
 function splitCategoryPath(raw: string): string[] {
   return raw
@@ -232,6 +373,176 @@ export function amazonOrganicPerformanceScore(row: AmazonProductRow): number {
   return reviewScore + ratingScore + bsrScore + salesScore;
 }
 
+// ---------------------------------------------------------------------------
+// Disqualifier detection (Problem 2)
+// ---------------------------------------------------------------------------
+
+/**
+ * Returns `true` when the candidate title contains a product-type disqualifier
+ * word that is NOT present in the (cleaned) search keyword.
+ *
+ * Examples that trigger:
+ *   keyword="Washing Machine", title="OxiClean Washing Machine Cleaner" → true
+ *   keyword="Baby Crib",       title="Crib Mattress"                   → true
+ *
+ * Examples that do NOT trigger (keyword contains the disqualifier word):
+ *   keyword="Vacuum Cleaner",  title="Dyson Vacuum Cleaner"            → false
+ *   keyword="Air Filter",      title="3M Air Filter"                   → false
+ *   keyword="Mattress Topper", title="Memory Foam Mattress Topper"     → false
+ */
+export function isDisqualifiedByProductType(
+  kwpKeyword: string,
+  row: AmazonProductRow
+): boolean {
+  const cleanedKeyword = normalizeText(cleanKeywordForMatching(kwpKeyword));
+  const keywordTokens = new Set(
+    cleanedKeyword.split(' ').filter((w) => w.length > 1)
+  );
+  // Also include stemmed forms of keyword tokens for comparison
+  const keywordStemmed = new Set([...keywordTokens].map(stemToken));
+
+  const title = normalizeText(String(row.title ?? row.product_title ?? ''));
+  const titleTokens = title.split(' ').filter((w) => w.length > 1);
+
+  for (const token of titleTokens) {
+    const stemmed = stemToken(token);
+    if (
+      !GENERIC_DISQUALIFIER_WORDS.has(token) &&
+      !GENERIC_DISQUALIFIER_WORDS.has(stemmed)
+    ) {
+      continue;
+    }
+    // Keyword already mentions this word → intended product type, not a mismatch
+    if (
+      keywordTokens.has(token) ||
+      keywordTokens.has(stemmed) ||
+      keywordStemmed.has(token) ||
+      keywordStemmed.has(stemmed)
+    ) {
+      continue;
+    }
+    return true;
+  }
+  return false;
+}
+
+// ---------------------------------------------------------------------------
+// Confidence scoring (Problem 1 + 2)
+// ---------------------------------------------------------------------------
+
+/**
+ * Compute a 0–100 confidence score for a candidate product match.
+ *
+ * Scoring formula:
+ *   category alignment:  scoreCategoryRelevance(cleanedKw, row) × 0.20  → 0–20
+ *   title overlap:       scoreTitleRelevance(cleanedKw, row)    × 0.50  → 0–50
+ *   match type bonus:    category=20, title=15, partial_title=10, keyword=8, fallback=5
+ *   performance:         min(organicScore / 10, 10)                      → 0–10
+ *   exact title bonus:   +15 bonus if titleScore is 100 (exact match)
+ *   disqualifier:        −50 if product-type mismatch detected
+ *   ─────────────────────────────────────────────────────────────
+ *   total clamped to [0, 100]
+ *
+ * Thresholds:
+ *   ≥ 90 → high confidence, accept
+ *   70–89 → accept, flag as isFallbackQuality
+ *   < 70  → reject (blank result preferred over wrong match)
+ */
+export function computeMatchConfidence(
+  kwpKeyword: string,
+  row: AmazonProductRow,
+  matchType: AmazonMatchType,
+  organicScore: number
+): { confidence: number; isFallbackQuality: boolean; disqualified: boolean } {
+  const cleanedKeyword = cleanKeywordForMatching(kwpKeyword);
+
+  // Category alignment: 0–20
+  const catScore = scoreCategoryRelevance(cleanedKeyword, row);
+  const catComponent = catScore * 0.2;
+
+  // Title overlap (synonym-aware): 0–50
+  const titleScore = scoreTitleRelevance(cleanedKeyword, row);
+  const titleComponent = titleScore * 0.5;
+
+  // Match type bonus: 0–20
+  const matchTypeBonusMap: Record<AmazonMatchType, number> = {
+    category: 20,
+    title: 15,
+    partial_title: 10,
+    keyword: 8,
+    fallback: 5,
+    none: 0,
+  };
+  const matchTypeBonus = matchTypeBonusMap[matchType] ?? 0;
+
+  // Organic performance: 0–10
+  const perfComponent = Math.min(organicScore / 10, 10);
+
+  // Exact title phrase match bonus: +15
+  const exactTitleBonus = titleScore >= 100 ? 15 : 0;
+
+  // Disqualifier: −50 penalty
+  const disqualified = isDisqualifiedByProductType(kwpKeyword, row);
+  const disqualifierPenalty = disqualified ? -50 : 0;
+
+  const raw =
+    catComponent +
+    titleComponent +
+    matchTypeBonus +
+    perfComponent +
+    exactTitleBonus +
+    disqualifierPenalty;
+  const confidence = Math.max(0, Math.min(100, raw));
+
+  return {
+    confidence,
+    isFallbackQuality:
+      confidence >= CONFIDENCE_ACCEPT_FALLBACK && confidence < CONFIDENCE_ACCEPT_HIGH,
+    disqualified,
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Diagnostic logging
+// ---------------------------------------------------------------------------
+
+/** Structured diagnostic log entry for a single keyword match attempt */
+export interface MatchDiagnostic {
+  keyword: string;
+  cleanedKeyword: string;
+  candidatesEvaluated: number;
+  acceptedTitle: string | null;
+  acceptedMatchType: AmazonMatchType | null;
+  confidence: number | null;
+  isFallbackQuality: boolean;
+  rejectionReason: string | null;
+  disqualifiedCount: number;
+}
+
+/**
+ * Emit a per-keyword diagnostic log line.
+ * Set environment variable LOG_AMAZON_MATCH_DIAGNOSTICS=false to suppress.
+ */
+export function logMatchDiagnostic(d: MatchDiagnostic): void {
+  if (process.env.LOG_AMAZON_MATCH_DIAGNOSTICS === 'false') return;
+
+  const accepted = d.acceptedTitle
+    ? `✅ "${d.acceptedTitle.slice(0, 60)}" (${d.acceptedMatchType}, conf=${d.confidence}${d.isFallbackQuality ? ', FALLBACK' : ''})`
+    : `❌ no match`;
+
+  const rejection = d.rejectionReason ? ` | reason="${d.rejectionReason}"` : '';
+
+  console.log(
+    `[AmazonMatch] kw="${d.keyword}" cleaned="${d.cleanedKeyword}" ` +
+      `pool=${d.candidatesEvaluated} disqualified=${d.disqualifiedCount} ` +
+      `→ ${accepted}${rejection}`
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Scoring functions (synonym-aware)
+// ---------------------------------------------------------------------------
+
 function categoryMatchesLevel(categoryTexts: string[], levelPhrase: string): boolean {
   const levelNorm = normalizeText(levelPhrase);
   if (!levelNorm) return false;
@@ -241,7 +552,7 @@ function categoryMatchesLevel(categoryTexts: string[], levelPhrase: string): boo
 
   return categoryTexts.some((cat) => {
     if (cat.includes(levelNorm) || levelNorm.includes(cat)) return true;
-    return levelWords.every((w) => tokenMatchesInText(w, cat));
+    return levelWords.every((w) => tokenWithSynonymsMatchesText(w, cat));
   });
 }
 
@@ -254,7 +565,7 @@ function titleMatchesLevel(row: AmazonProductRow, levelPhrase: string): boolean 
 
   const levelWords = levelNorm.split(' ').filter((w) => w.length > 1);
   if (levelWords.length === 0) return false;
-  return levelWords.every((w) => tokenMatchesInText(w, title));
+  return levelWords.every((w) => tokenWithSynonymsMatchesText(w, title));
 }
 
 /** ≥60% of variant tokens in title, with at least one non-generic token hit */
@@ -265,11 +576,11 @@ export function partialTitleMatches(kwpKeyword: string, row: AmazonProductRow): 
   const words = tokenizeKeyword(stripRetailerNoise(kwpKeyword));
   if (words.length < 2) return false;
 
-  const hits = words.filter((w) => tokenMatchesInText(w, title)).length;
+  const hits = words.filter((w) => tokenWithSynonymsMatchesText(w, title)).length;
   if (hits / words.length < PARTIAL_TITLE_MIN_RATIO) return false;
 
   const significantHits = words.filter(
-    (w) => !GENERIC_MATCH_TOKENS.has(w) && tokenMatchesInText(w, title)
+    (w) => !GENERIC_MATCH_TOKENS.has(w) && tokenWithSynonymsMatchesText(w, title)
   );
   return significantHits.length >= 1;
 }
@@ -281,7 +592,7 @@ function hasSignificantTokenOverlap(kwpKeyword: string, row: AmazonProductRow): 
   const haystack = `${title} ${categories}`;
 
   return words.some(
-    (w) => !GENERIC_MATCH_TOKENS.has(w) && tokenMatchesInText(w, haystack)
+    (w) => !GENERIC_MATCH_TOKENS.has(w) && tokenWithSynonymsMatchesText(w, haystack)
   );
 }
 
@@ -291,20 +602,29 @@ export function getAmazonRowAsin(row: AmazonProductRow): string | null {
   return String(asin).trim().toUpperCase();
 }
 
+/**
+ * Title token coverage score (0–100), synonym-aware.
+ * 100 = exact phrase in title; partial = proportional token hits.
+ */
 export function scoreTitleRelevance(kwpKeyword: string, row: AmazonProductRow): number {
   const title = normalizeText(row.title ?? row.product_title ?? '');
-  const kwNorm = normalizeText(stripRetailerNoise(kwpKeyword));
+  const kwNorm = normalizeText(cleanKeywordForMatching(kwpKeyword));
   if (!title || !kwNorm) return 0;
   if (title.includes(kwNorm)) return 100;
 
   const words = kwNorm.split(' ').filter((w) => w.length > 1);
   if (words.length === 0) return 0;
-  const hits = words.filter((w) => tokenMatchesInText(w, title)).length;
+  const hits = words.filter((w) => tokenWithSynonymsMatchesText(w, title)).length;
+  if (hits === words.length) return 100;
   return Math.round((hits / words.length) * 85);
 }
 
+/**
+ * Category alignment score (0–100), synonym-aware.
+ * Checks keyword tokens against all product category fields.
+ */
 export function scoreCategoryRelevance(kwpKeyword: string, row: AmazonProductRow): number {
-  const kwWords = tokenizeKeyword(stripRetailerNoise(kwpKeyword));
+  const kwWords = tokenizeKeyword(cleanKeywordForMatching(kwpKeyword));
   if (kwWords.length === 0) return 0;
 
   const categories = getProductCategoryTexts(row);
@@ -312,7 +632,7 @@ export function scoreCategoryRelevance(kwpKeyword: string, row: AmazonProductRow
 
   let best = 0;
   for (const cat of categories) {
-    const hits = kwWords.filter((w) => tokenMatchesInText(w, cat)).length;
+    const hits = kwWords.filter((w) => tokenWithSynonymsMatchesText(w, cat)).length;
     best = Math.max(best, Math.round((hits / kwWords.length) * 100));
   }
   return best;
@@ -325,6 +645,10 @@ export function scoreRootPoolSimilarity(kwpKeyword: string, row: AmazonProductRo
   );
 }
 
+// ---------------------------------------------------------------------------
+// Candidate selection
+// ---------------------------------------------------------------------------
+
 function filterExcludedAsins(
   rows: AmazonProductRow[],
   excludeAsins?: Set<string>
@@ -336,6 +660,61 @@ function filterExcludedAsins(
   });
 }
 
+/**
+ * Evaluate every row in `rows` for confidence; return the highest-confidence
+ * non-disqualified candidate, or null if none meets the threshold.
+ *
+ * This replaces the binary "take first hit" approach — all candidates in the
+ * matched set are evaluated, so a disqualified top-ranked product does not
+ * block a better-fitting candidate lower in the list.
+ */
+function pickBestConfidentCandidate(
+  rows: AmazonProductRow[],
+  kwpKeyword: string,
+  matchType: AmazonMatchType
+): { row: AmazonProductRow; confidence: number; isFallbackQuality: boolean } | null {
+  let bestAccepted: {
+    row: AmazonProductRow;
+    confidence: number;
+    isFallbackQuality: boolean;
+    organic: number;
+  } | null = null;
+
+  for (const row of rows) {
+    const organic = amazonOrganicPerformanceScore(row);
+    if (organic < 0) continue; // skip sponsored
+
+    const { confidence, isFallbackQuality, disqualified } = computeMatchConfidence(
+      kwpKeyword,
+      row,
+      matchType,
+      organic
+    );
+
+    if (confidence < CONFIDENCE_MIN_ACCEPT) continue;
+    if (disqualified) continue;
+
+    if (
+      bestAccepted === null ||
+      confidence > bestAccepted.confidence ||
+      (confidence === bestAccepted.confidence && organic > bestAccepted.organic)
+    ) {
+      bestAccepted = { row, confidence, isFallbackQuality, organic };
+    }
+  }
+
+  if (!bestAccepted) return null;
+  return {
+    row: bestAccepted.row,
+    confidence: bestAccepted.confidence,
+    isFallbackQuality: bestAccepted.isFallbackQuality,
+  };
+}
+
+/**
+ * Legacy: pick best organic performer (used in root-pool fallback where
+ * confidence has already been checked externally).
+ */
 function pickBestPerformer(rows: AmazonProductRow[], kwpKeyword?: string): AmazonProductRow | null {
   if (rows.length === 0) return null;
 
@@ -345,7 +724,9 @@ function pickBestPerformer(rows: AmazonProductRow[], kwpKeyword?: string): Amazo
   for (const row of rows) {
     const organic = amazonOrganicPerformanceScore(row);
     if (organic < 0) continue;
-    const tiebreak = kwpKeyword ? scoreTitleRelevance(kwpKeyword, row) * TITLE_TIEBREAKER_WEIGHT : 0;
+    const tiebreak = kwpKeyword
+      ? scoreTitleRelevance(kwpKeyword, row) * TITLE_TIEBREAKER_WEIGHT
+      : 0;
     const combined = organic + tiebreak;
     if (combined > bestCombined) {
       best = row;
@@ -362,29 +743,6 @@ function buildScopedUnusedPool(
 ): AmazonProductRow[] {
   if (!scopedAmazonRows?.length) return [];
   return filterExcludedAsins(filterOrganicPreferring(scopedAmazonRows), excludeAsins);
-}
-
-function pickBestSimilarRootFallback(
-  rows: AmazonProductRow[],
-  kwpKeyword: string,
-  minScore: number = ROOT_POOL_FALLBACK_MIN_SCORE
-): AmazonProductRow | null {
-  const scored = rows
-    .map((row) => ({ row, similarity: scoreRootPoolSimilarity(kwpKeyword, row) }))
-    .filter(
-      (x) =>
-        x.similarity >= minScore && hasSignificantTokenOverlap(kwpKeyword, x.row)
-    )
-    .sort((a, b) => b.similarity - a.similarity);
-
-  if (scored.length === 0) return null;
-
-  const topSimilarity = scored[0].similarity;
-  const topTier = scored
-    .filter((x) => x.similarity === topSimilarity)
-    .map((x) => x.row);
-
-  return pickBestPerformer(topTier, kwpKeyword);
 }
 
 function filterOrganicPreferring(rows: AmazonProductRow[]): AmazonProductRow[] {
@@ -412,6 +770,10 @@ function buildCandidatePool(
   return [];
 }
 
+// ---------------------------------------------------------------------------
+// Core matching logic
+// ---------------------------------------------------------------------------
+
 type MatchPhase = 'strict' | 'fallback' | 'all';
 
 function matchAmazonInternal(
@@ -423,35 +785,78 @@ function matchAmazonInternal(
 ): AmazonMatchResult | null {
   if (!kwpKeyword.trim()) return null;
 
+  // Build match levels from the cleaned keyword (marketing qualifiers stripped)
+  // and the original keyword as a fallback union, so:
+  //   "Best Rice Cooker" → tries "rice cooker" first, then "best rice cooker"
+  //   "Top Load Washing Machine" → unchanged (no marketing qualifiers)
+  const cleanedKeyword = cleanKeywordForMatching(kwpKeyword);
+  const cleanedLevels = buildAllMatchLevels(cleanedKeyword);
+  const originalLevels = buildAllMatchLevels(kwpKeyword);
+  const allLevels = [
+    ...cleanedLevels,
+    ...originalLevels.filter((l) => !cleanedLevels.includes(l)),
+  ];
+  const kwNorm = normalizeText(cleanedKeyword);
+
   if (phase === 'strict' || phase === 'all') {
     const candidates = buildCandidatePool(allAmazonRows, scopedAmazonRows, excludeAsins);
-    if (candidates.length) {
-      const levels = buildAllMatchLevels(kwpKeyword);
-      const kwNorm = normalizeText(kwpKeyword);
 
-      for (const level of levels) {
+    if (candidates.length) {
+      // --- Category pass ---
+      for (const level of allLevels) {
         const hits = candidates.filter((row) =>
           categoryMatchesLevel(getProductCategoryTexts(row), level)
         );
-        const best = pickBestPerformer(hits, kwpKeyword);
-        if (best) return { row: best, matchType: 'category' };
+        const best = pickBestConfidentCandidate(hits, kwpKeyword, 'category');
+        if (best) {
+          return {
+            row: best.row,
+            matchType: 'category',
+            confidence: best.confidence,
+            isFallbackQuality: best.isFallbackQuality,
+          };
+        }
       }
 
-      for (const level of levels) {
+      // --- Title pass ---
+      for (const level of allLevels) {
         const hits = candidates.filter((row) => titleMatchesLevel(row, level));
-        const best = pickBestPerformer(hits, kwpKeyword);
-        if (best) return { row: best, matchType: 'title' };
+        const best = pickBestConfidentCandidate(hits, kwpKeyword, 'title');
+        if (best) {
+          return {
+            row: best.row,
+            matchType: 'title',
+            confidence: best.confidence,
+            isFallbackQuality: best.isFallbackQuality,
+          };
+        }
       }
 
+      // --- Partial title pass ---
       const partialHits = candidates.filter((row) => partialTitleMatches(kwpKeyword, row));
-      const partialBest = pickBestPerformer(partialHits, kwpKeyword);
-      if (partialBest) return { row: partialBest, matchType: 'partial_title' };
+      const partialBest = pickBestConfidentCandidate(partialHits, kwpKeyword, 'partial_title');
+      if (partialBest) {
+        return {
+          row: partialBest.row,
+          matchType: 'partial_title',
+          confidence: partialBest.confidence,
+          isFallbackQuality: partialBest.isFallbackQuality,
+        };
+      }
 
+      // --- Exact keyword pass ---
       const exactHits = candidates.filter(
         (row) => normalizeText(row.keyword ?? row.sub_keyword ?? '') === kwNorm
       );
-      const exactBest = pickBestPerformer(exactHits, kwpKeyword);
-      if (exactBest) return { row: exactBest, matchType: 'keyword' };
+      const exactBest = pickBestConfidentCandidate(exactHits, kwpKeyword, 'keyword');
+      if (exactBest) {
+        return {
+          row: exactBest.row,
+          matchType: 'keyword',
+          confidence: exactBest.confidence,
+          isFallbackQuality: exactBest.isFallbackQuality,
+        };
+      }
     }
 
     if (phase === 'strict') return null;
@@ -460,18 +865,47 @@ function matchAmazonInternal(
   if (phase === 'fallback' || phase === 'all') {
     const scopedUnused = buildScopedUnusedPool(scopedAmazonRows, excludeAsins);
     if (scopedUnused.length > 0) {
-      const fallback = pickBestSimilarRootFallback(scopedUnused, kwpKeyword);
-      if (fallback) return { row: fallback, matchType: 'fallback' };
+      // Similarity-ranked candidates, checked with full confidence gate
+      const scored = scopedUnused
+        .map((row) => ({ row, similarity: scoreRootPoolSimilarity(kwpKeyword, row) }))
+        .filter(
+          (x) =>
+            x.similarity >= ROOT_POOL_FALLBACK_MIN_SCORE &&
+            hasSignificantTokenOverlap(kwpKeyword, x.row)
+        )
+        .sort((a, b) => b.similarity - a.similarity);
+
+      for (const { row } of scored) {
+        const organic = amazonOrganicPerformanceScore(row);
+        if (organic < 0) continue;
+        const { confidence, isFallbackQuality, disqualified } = computeMatchConfidence(
+          kwpKeyword,
+          row,
+          'fallback',
+          organic
+        );
+        if (confidence >= CONFIDENCE_MIN_ACCEPT && !disqualified) {
+          return { row, matchType: 'fallback', confidence, isFallbackQuality };
+        }
+      }
     }
   }
 
   return null;
 }
 
+// ---------------------------------------------------------------------------
+// Public batch API (two-phase, preserves existing architecture)
+// ---------------------------------------------------------------------------
+
 /**
  * Two-phase batch matching for consolidation.
+ *
  * Phase A: strict passes for all seeds (volume order) — reserves best strict matches.
  * Phase B: root-pool fallback only for still-unmatched seeds.
+ * ASIN deduplication enforced between and within phases.
+ *
+ * Emits a per-keyword diagnostic log for every seed after both phases complete.
  */
 export function matchAmazonForKwpSeedsBatch(
   seeds: KwpSeedInput[],
@@ -485,6 +919,7 @@ export function matchAmazonForKwpSeedsBatch(
     (a, b) => Number(b.searchVolume ?? 0) - Number(a.searchVolume ?? 0)
   );
 
+  // Phase A: strict
   for (const seed of ordered) {
     const rootKey = seed.rootKeyword.toLowerCase().trim();
     const scopedAmz = amzByRoot.get(rootKey) ?? [];
@@ -500,6 +935,7 @@ export function matchAmazonForKwpSeedsBatch(
     if (asin) usedAsins.add(asin);
   }
 
+  // Phase B: fallback for unmatched
   for (const seed of ordered) {
     if (results.get(seed.key)) continue;
 
@@ -517,8 +953,47 @@ export function matchAmazonForKwpSeedsBatch(
     if (asin) usedAsins.add(asin);
   }
 
+  // Emit diagnostic logs
+  for (const seed of ordered) {
+    const result = results.get(seed.key);
+    const cleanedKeyword = cleanKeywordForMatching(seed.keyword);
+    const rootKey = seed.rootKeyword.toLowerCase().trim();
+    const pool = [...allAmazonRows, ...(amzByRoot.get(rootKey) ?? [])];
+    const uniquePool = [...new Map(pool.map((r) => [getAmazonRowAsin(r) ?? Math.random(), r])).values()];
+
+    const disqualifiedCount = uniquePool.filter((r) =>
+      isDisqualifiedByProductType(seed.keyword, r)
+    ).length;
+
+    const acceptedTitle = result
+      ? String(result.row.title ?? result.row.product_title ?? '')
+      : null;
+
+    logMatchDiagnostic({
+      keyword: seed.keyword,
+      cleanedKeyword,
+      candidatesEvaluated: uniquePool.length,
+      acceptedTitle,
+      acceptedMatchType: result?.matchType ?? null,
+      confidence: result?.confidence ?? null,
+      isFallbackQuality: result?.isFallbackQuality ?? false,
+      rejectionReason: result
+        ? null
+        : uniquePool.length === 0
+        ? 'empty candidate pool'
+        : disqualifiedCount > 0
+        ? `all ${disqualifiedCount} candidate(s) disqualified by product-type check`
+        : 'no candidate reached confidence threshold',
+      disqualifiedCount,
+    });
+  }
+
   return results;
 }
+
+// ---------------------------------------------------------------------------
+// Public single-keyword API (preserves existing call signatures)
+// ---------------------------------------------------------------------------
 
 /** Human-readable label for consolidated table / exports */
 export function formatAmazonMatchType(matchType: AmazonMatchType | undefined): string {
@@ -539,7 +1014,8 @@ export function formatAmazonMatchType(matchType: AmazonMatchType | undefined): s
 }
 
 /**
- * Match one Keyword Planner row (all phases in one call — prefer batch for consolidation).
+ * Match one Keyword Planner row (all phases in one call).
+ * Prefer `matchAmazonForKwpSeedsBatch` for consolidation (better ASIN dedup).
  */
 export function matchAmazonForKwpKeyword(
   kwpKeyword: string,
@@ -554,7 +1030,10 @@ export function matchAmazonForKwpKeyword(
     excludeAsins,
     'strict'
   );
-  if (strict) return strict.row;
+  if (strict) {
+    _logSingleKeywordDiagnostic(kwpKeyword, strict, allAmazonRows);
+    return strict.row;
+  }
 
   const fallback = matchAmazonInternal(
     kwpKeyword,
@@ -563,6 +1042,7 @@ export function matchAmazonForKwpKeyword(
     excludeAsins,
     'fallback'
   );
+  _logSingleKeywordDiagnostic(kwpKeyword, fallback, allAmazonRows);
   return fallback?.row ?? null;
 }
 
@@ -588,4 +1068,33 @@ export function matchAmazonForKwpKeywordWithType(
     excludeAsins,
     'fallback'
   );
+}
+
+/** Internal helper — diagnostic for single-keyword public API */
+function _logSingleKeywordDiagnostic(
+  kwpKeyword: string,
+  result: AmazonMatchResult | null,
+  pool: AmazonProductRow[]
+): void {
+  const cleanedKeyword = cleanKeywordForMatching(kwpKeyword);
+  const disqualifiedCount = pool.filter((r) => isDisqualifiedByProductType(kwpKeyword, r)).length;
+  logMatchDiagnostic({
+    keyword: kwpKeyword,
+    cleanedKeyword,
+    candidatesEvaluated: pool.length,
+    acceptedTitle: result
+      ? String(result.row.title ?? result.row.product_title ?? '')
+      : null,
+    acceptedMatchType: result?.matchType ?? null,
+    confidence: result?.confidence ?? null,
+    isFallbackQuality: result?.isFallbackQuality ?? false,
+    rejectionReason: result
+      ? null
+      : pool.length === 0
+      ? 'empty candidate pool'
+      : disqualifiedCount > 0
+      ? `all ${disqualifiedCount} candidate(s) disqualified`
+      : 'no candidate reached confidence threshold',
+    disqualifiedCount,
+  });
 }

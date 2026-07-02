@@ -334,6 +334,8 @@ const Dashboard = () => {
   const [isPreliminary, setIsPreliminary] = useState(false);
   const [hasPerformedSearch, setHasPerformedSearch] = useState(false);
   const [consolidatedResults, setConsolidatedResults] = useState<any[]>([]);
+  /** True while the frontend is actively fetching parquet data + building the consolidated table */
+  const [isTableRefreshing, setIsTableRefreshing] = useState(false);
 
   // ── Batch processing state (variant limit = 0 / unlimited mode) ──────────
   /** All keywords returned from the planner when variant limit is 0 */
@@ -1448,6 +1450,7 @@ const Dashboard = () => {
     optAmz?: any[],
     optAli?: any[]
   ) => {
+    setIsTableRefreshing(true);
     // We anchor on Amazon rows (products). If Amazon is disabled, fall back to KWP keywords.
     const amzRows: any[] = optAmz ?? (amazonResults && amazonResults.length > 0 ? amazonResults : []);
     const aliRows: any[] = optAli ?? (alibabaResults && alibabaResults.length > 0 ? alibabaResults : []);
@@ -1744,6 +1747,7 @@ const Dashboard = () => {
     ).map((row, i) => ({ rank: i + 1, ...row }));
 
     setConsolidatedResults(ranked);
+    setIsTableRefreshing(false);
   }, [amazonResults, alibabaResults, keywordPlannerResults, trendsResults, googleTrendScore, fcl]);
 
   // Apply UI filters to the consolidated list dynamically.
@@ -1760,6 +1764,7 @@ const Dashboard = () => {
       if (pipelineStatus !== 'COMPLETED') return;
 
       setStatusMessage('Aggregating stage data for all variants...');
+      setIsTableRefreshing(true);
       let isCancelled = false;
       const aggregateCategoryData = async () => {
         try {
@@ -1845,17 +1850,20 @@ const Dashboard = () => {
               batchConsolidatedSnapshotRef.current = reRanked;
               return reRanked;
             });
+            setIsTableRefreshing(false);
             // ──────────────────────────────────────────────────────────────────
           } else {
             // Normal single-batch or fixed-limit mode: just replace.
             batchConsolidatedSnapshotRef.current = [];
             buildConsolidated(megaKwp, megaTrends, megaAmz, megaAli);
+            // buildConsolidated clears isTableRefreshing synchronously inside itself
           }
           setStatusMessage('Category Pipeline completed! View stage data below.');
 
 
         } catch (e) {
           console.error('Error aggregating category data', e);
+          setIsTableRefreshing(false);
         }
       };
 
@@ -3989,6 +3997,14 @@ const Dashboard = () => {
                     <span className="text-sm text-gray-300">
                       {displayedConsolidatedResults.length} rows
                     </span>
+                    {(nextBatchProcessing || isLoading || isTableRefreshing || pipelineStatus === 'POLLING') && (
+                      <span className="flex items-center gap-1.5 text-xs text-amber-400 font-semibold animate-pulse" title="Building consolidated table...">
+                        <svg className="w-3.5 h-3.5 animate-spin" fill="none" stroke="currentColor" strokeWidth="2.5" viewBox="0 0 24 24">
+                          <path strokeLinecap="round" strokeLinejoin="round" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
+                        </svg>
+                        updating...
+                      </span>
+                    )}
                   </div>
                 </div>
 
@@ -4180,9 +4196,23 @@ const Dashboard = () => {
                   <div ref={stickyScrollContentRef} style={{ height: '1px' }} />
                 </div>
 
+                {/* ── PROMINENT BATCH LOADING INDICATOR ── */}
+                {nextBatchProcessing && (
+                  <div className="mt-6 p-6 rounded-2xl bg-gradient-to-br from-[#1a2318]/90 to-[#243022]/90 border border-[#C0FE72]/30 shadow-2xl flex flex-col items-center justify-center text-center py-10 animate-pulse">
+                    <div className="w-12 h-12 border-4 border-[#C0FE72] border-t-transparent rounded-full animate-spin mb-4" />
+                    <h3 className="text-[#C0FE72] text-lg font-extrabold tracking-widest uppercase mb-1">
+                      Processing next keyword batch. Please wait...
+                    </h3>
+                    <p className="text-xs text-gray-400">
+                      Querying API endpoints and updating results table in real-time.
+                    </p>
+                  </div>
+                )}
+
                 {/* ── NEXT BATCH BUTTON — unlimited mode (variant limit = 0) ── */}
                 {pipelineStatus === 'COMPLETED' &&
                   !isActiveRun &&
+                  !nextBatchProcessing &&
                   allPlannerKeywords.length > 0 &&
                   batchProcessedCount < allPlannerKeywords.length && (
                     <div className="mt-6 p-5 rounded-2xl bg-gradient-to-br from-[#1a2318]/80 to-[#243022]/80 border border-[#C0FE72]/30 backdrop-blur-sm shadow-xl">
@@ -4210,26 +4240,12 @@ const Dashboard = () => {
                           id="next-batch-btn"
                           onClick={handleNextBatch}
                           disabled={nextBatchProcessing}
-                          className={`flex-shrink-0 flex items-center gap-2.5 px-6 py-3 rounded-xl font-bold text-sm tracking-wide transition-all shadow-lg ${nextBatchProcessing
-                            ? 'bg-gray-700/60 text-gray-400 cursor-not-allowed border border-white/10'
-                            : 'bg-[#C0FE72] text-black hover:bg-[#d4ff8c] active:scale-95 shadow-[#C0FE72]/20'
-                            }`}
+                          className="flex-shrink-0 flex items-center gap-2.5 px-6 py-3 rounded-xl font-bold text-sm tracking-wide transition-all shadow-lg bg-[#C0FE72] text-black hover:bg-[#d4ff8c] active:scale-95 shadow-[#C0FE72]/20"
                         >
-                          {nextBatchProcessing ? (
-                            <>
-                              <svg className="w-4 h-4 animate-spin" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24">
-                                <path strokeLinecap="round" strokeLinejoin="round" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
-                              </svg>
-                              PROCESSING...
-                            </>
-                          ) : (
-                            <>
-                              <svg className="w-4 h-4" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24">
-                                <path strokeLinecap="round" strokeLinejoin="round" d="M13 5l7 7-7 7M5 5l7 7-7 7" />
-                              </svg>
-                              PROCESS NEXT {Math.min(30, allPlannerKeywords.length - batchProcessedCount)} KEYWORDS
-                            </>
-                          )}
+                          <svg className="w-4 h-4" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24">
+                            <path strokeLinecap="round" strokeLinejoin="round" d="M13 5l7 7-7 7M5 5l7 7-7 7" />
+                          </svg>
+                          PROCESS NEXT KEYWORD BATCH
                         </button>
                       </div>
 
@@ -4256,6 +4272,7 @@ const Dashboard = () => {
             {/* GT threshold removed every row from consolidated view */}
             {pipelineStatus === 'COMPLETED' &&
               !isLoading &&
+              !isTableRefreshing &&
               googleTrendScore > 0 &&
               displayedConsolidatedResults.length === 0 &&
               hasLoadedKeywordPlanner &&
@@ -4273,7 +4290,7 @@ const Dashboard = () => {
               )}
 
             {/* ── NO DATA PASSED FILTERS – empty state after pipeline completes ── */}
-            {pipelineStatus === 'COMPLETED' && !isLoading && consolidatedResults.length === 0 && hasLoadedKeywordPlanner && (!keywordPlannerResults || keywordPlannerResults.length === 0) && (
+            {pipelineStatus === 'COMPLETED' && !isLoading && !isTableRefreshing && consolidatedResults.length === 0 && hasLoadedKeywordPlanner && (!keywordPlannerResults || keywordPlannerResults.length === 0) && (
               <div className="mt-6 mb-10 p-6 bg-[#2a3627] rounded border border-orange-400/40 text-center">
                 <div className="text-4xl mb-3">🔍</div>
                 <p className="text-lg font-bold text-orange-300 mb-2">No data passed the current filters</p>

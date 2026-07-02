@@ -1,4 +1,7 @@
 # AMAZON CLEAN LAMBDA FUNCTION
+# v2: Filter ordering fix — write the full unfiltered normalized dataset to Parquet
+# so that amazonKwpMatch.ts has the complete candidate pool for matching.
+# User price/reviews/rating filters are applied downstream (products API / consolidation).
 
 import json
 import os
@@ -86,7 +89,7 @@ def normalize_item(item, keyword, geo, date, search_category):
         "search_category": search_category,
         "amazon_price_usd": parse_price(safe_get(item, "price")),
         "reviews_count": parse_int(safe_get(item, "reviews_count")),
-        "rating":parse_float(safe_get(item, "rating")),
+        "rating": parse_float(safe_get(item, "rating")),
         "bestseller_rank": parse_int(safe_get(item, "bestseller_rank")),
         "brand": safe_get(item, "brand"),
         "in_stock": safe_get(item, "in_stock"),
@@ -98,15 +101,14 @@ def normalize_item(item, keyword, geo, date, search_category):
     }
 
 # -----------------------
-# 🔥 FIXED FILTER FUNCTION (ROW BASED)
+# Filter function (kept for diagnostics / downstream use)
+# NOT applied to the Parquet write — see s3_json_to_parquet for rationale.
 # -----------------------
 def apply_amazon_filters(df, filters):
 
     if not filters.get("amazon_filters_on", False):
-        print("🟡 Filters OFF")
+        print("🟡 Filters OFF — skipping filter pass")
         return df
-
-    print("🟢 Applying Amazon filters")
 
     price_min = filters.get("price_min")
     price_max = filters.get("price_max")
@@ -114,7 +116,6 @@ def apply_amazon_filters(df, filters):
     reviews_max = filters.get("reviews_max")
     min_rating = filters.get("min_rating")
 
-    # Helper to check if filter is active (not None, not 0, and not default maxes)
     def is_active_min(val):
         if val is None: return False
         try:
@@ -137,8 +138,6 @@ def apply_amazon_filters(df, filters):
     has_rating_min = is_active_min(min_rating)
 
     filtered_rows = []
-
-    print(f"📊 Before filter: {len(df)}")
 
     for _, row in df.iterrows():
 
@@ -169,14 +168,19 @@ def apply_amazon_filters(df, filters):
 
         filtered_rows.append(row)
 
-    df_filtered = pd.DataFrame(filtered_rows)
-
-    print(f"📊 After filter: {len(df_filtered)}")
-
-    return df_filtered
+    return pd.DataFrame(filtered_rows)
 
 # -----------------------
 # S3 Processing
+#
+# FILTER ORDERING (v2):
+#   OLD: normalize → filter → save to Parquet → match
+#   NEW: normalize → save full pool to Parquet → match → filters applied downstream
+#
+# Rationale: applying price/review/rating filters before matching shrinks the
+# candidate pool BEFORE amazonKwpMatch.ts runs, causing valid product-type
+# matches to be silently dropped. The final products API (/api/products) already
+# applies user-configured display filters on top of the ranked output.
 # -----------------------
 def s3_json_to_parquet(input_bucket, input_key, output_bucket, output_key, filters, search_category):
 
@@ -190,8 +194,8 @@ def s3_json_to_parquet(input_bucket, input_key, output_bucket, output_key, filte
     else:
         items = [data]
 
-    keyword = data.get("keyword")
-    geo = data.get("country")
+    keyword = data.get("keyword") if isinstance(data, dict) else None
+    geo = data.get("country") if isinstance(data, dict) else None
 
     date = datetime.now(timezone.utc).strftime("%Y-%m-%d")
 
@@ -200,35 +204,46 @@ def s3_json_to_parquet(input_bucket, input_key, output_bucket, output_key, filte
         try:
             normalized.append(normalize_item(it, keyword, geo, date, search_category))
         except Exception as e:
-            print("Error:", e)
+            print("Normalize error:", e)
 
     df = pd.DataFrame(normalized)
-    
-    # Apply filters
-    df = apply_amazon_filters(df, filters)
-    size = filters.get("size")
-    if isinstance(size, int) and size > 0:
-        df = df[:size]
+    print(f"📊 Total normalized rows (full pool, unfiltered): {len(df)}")
 
-    # Write parquet
+    # Diagnostic: report what the filter WOULD have removed (for logging only)
+    if filters.get("amazon_filters_on", False) and not df.empty:
+        df_filtered = apply_amazon_filters(df, filters)
+        print(
+            f"📊 Rows that WOULD pass user filters (not applied here): "
+            f"{len(df_filtered)} / {len(df)}"
+        )
+    else:
+        df_filtered = df  # reference only
+
+    # Write FULL unfiltered pool to Parquet (matcher needs all candidates)
+    if df.empty:
+        return 0, None, None
+
     tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".parquet")
     pq.write_table(pa.Table.from_pandas(df), tmp.name)
-
     s3.upload_file(tmp.name, output_bucket, output_key)
 
-    # Extract Browse Nodes for Alibaba stage
+    # Extract browse nodes from the first row of the relevance-sorted dataset.
+    # Items arrive pre-sorted by relevance score from the fetch Lambda, so
+    # iloc[0] represents the highest-relevance product — the best proxy for the
+    # intended product category without running the full matcher here.
     target_node = None
     fallback_node = None
-    if not df.empty:
-        full_cat = df.iloc[0].get("full_category", "")
-        if isinstance(full_cat, str):
-            parts = [c.strip() for c in full_cat.split(">") if c.strip()]
-            if len(parts) >= 3:
-                target_node, fallback_node = parts[2], parts[1]
-            elif len(parts) >= 2:
-                target_node, fallback_node = parts[1], parts[0]
-            elif len(parts) >= 1:
-                target_node, fallback_node = parts[0], parts[0]
+    full_cat = df.iloc[0].get("full_category", "")
+    if isinstance(full_cat, str):
+        parts = [c.strip() for c in full_cat.split(">") if c.strip()]
+        if len(parts) >= 3:
+            target_node, fallback_node = parts[2], parts[1]
+        elif len(parts) >= 2:
+            target_node, fallback_node = parts[1], parts[0]
+        elif len(parts) >= 1:
+            target_node, fallback_node = parts[0], parts[0]
+
+    print(f"🗂️  Browse nodes → target={target_node} fallback={fallback_node}")
 
     return len(df), target_node, fallback_node
 
@@ -236,9 +251,6 @@ def s3_json_to_parquet(input_bucket, input_key, output_bucket, output_key, filte
 # Output Key
 # -----------------------
 def generate_output_key(input_key, search_mode):
-    # ts = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H-%M-%SZ")
-    # return f"clean/{search_mode}/amazon/{ts}.parquet"
-
     timestamp = input_key.split("/")[-1].replace(".json", "")
     return f"clean/{search_mode}/amazon/{timestamp}.parquet"
 
@@ -262,6 +274,7 @@ def lambda_handler(event, context):
                 "rows_processed": 0
             }
 
+        # Filters passed through for diagnostic logging only (not applied to Parquet)
         filters = {
             "amazon_filters_on": event.get("enable_amazon", False),
             "price_min": event.get("amz_price_min"),
@@ -269,10 +282,9 @@ def lambda_handler(event, context):
             "reviews_min": event.get("reviews_min"),
             "reviews_max": event.get("reviews_max"),
             "min_rating": event.get("rating_min"),
-            # "size": event.get("size")
         }
 
-        print("🔍 Filters:", filters)
+        print("🔍 User filters (diagnostic only, not applied to Parquet):", filters)
 
         output_bucket = OUTPUT_BUCKET
         output_key = generate_output_key(input_key, search_mode)
@@ -290,18 +302,17 @@ def lambda_handler(event, context):
             return {
                 "stage": "amazon_clean",
                 "status": "EMPTY",
-                "message": "No Amazon products remained after filtering",
+                "message": "No Amazon products after normalization",
                 "rows_processed": 0,
                 "target_browse_node": None,
                 "fallback_browse_node": None,
                 "output_file": None
             }
 
-
         return {
             "stage": "amazon_clean",
             "status": "SUCCEEDED",
-            "message": "Amazon clean stage completed",
+            "message": f"Amazon clean stage completed — {rows} rows written to Parquet (unfiltered pool)",
             "rows_processed": rows,
             "target_browse_node": target_node,
             "fallback_browse_node": fallback_node,
@@ -317,5 +328,3 @@ def lambda_handler(event, context):
             "error": str(e),
             "rows_processed": 0
         }
-
-
