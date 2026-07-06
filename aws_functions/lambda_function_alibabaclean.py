@@ -293,105 +293,93 @@ def normalize_item(item, data_collected_at, keyword, search_category=None):
 
 # ─────────────────────────────────────────────────────────────────────────────
 # ALIBABA FILTERS
+# Null / empty / zero filter values mean "do not apply this filter".
 # ─────────────────────────────────────────────────────────────────────────────
 
+def _filter_value_is_active(val):
+    """True when a filter parameter should be applied (non-null, non-empty, non-zero)."""
+    if val is None:
+        return False
+    if isinstance(val, float) and pd.isna(val):
+        return False
+    if isinstance(val, bool):
+        return val is True
+    if isinstance(val, str):
+        stripped = val.strip().lower()
+        if stripped in ("", "null", "none", "undefined", "false", "0"):
+            return False
+        try:
+            return float(stripped) != 0.0
+        except ValueError:
+            return stripped == "true"
+    if isinstance(val, (int, float)):
+        return float(val) != 0.0
+    return True
+
+
+def _verified_supplier_filter_active(val):
+    if val is True:
+        return True
+    if isinstance(val, str):
+        return val.strip().lower() == "true"
+    return False
+
+
 def apply_alibaba_filters(df, filters):
-    if not filters.get("enable_alibaba", False):
-        print("🟡 Alibaba filters OFF — saving all rows")
+    if df.empty:
         return df
 
-    print("🟢 Applying Alibaba filters")
+    if not filters.get("enable_alibaba", False):
+        print("Alibaba filters OFF — saving all rows")
+        return df
 
     margin_min            = filters.get("margin_min")
     moq_max               = filters.get("moq_max")
     min_rating            = filters.get("min_rating")
     verified_supplier_val = filters.get("verified_supplier")
 
-    def is_valid(val):
-        if val is None:
-            return False
-        if isinstance(val, float) and pd.isna(val):
-            return False
-        if isinstance(val, str):
-            stripped = val.strip().lower()
-            if stripped in ("", "null", "none", "undefined"):
-                return False
-            try:
-                if float(stripped) == 0.0:
-                    return False
-            except ValueError:
-                pass
-        elif isinstance(val, (int, float)):
-            if float(val) == 0.0:
-                return False
-        return True
+    has_margin  = _filter_value_is_active(margin_min)
+    has_moq     = _filter_value_is_active(moq_max)
+    has_rating  = _filter_value_is_active(min_rating)
+    is_verified_only = _verified_supplier_filter_active(verified_supplier_val)
 
-    has_margin  = is_valid(margin_min)
-    has_moq     = is_valid(moq_max)
-    has_rating  = is_valid(min_rating)
+    if not (has_margin or has_moq or has_rating or is_verified_only):
+        print(f"No active Alibaba filters — keeping all {len(df)} rows")
+        return df
 
-    is_verified_only = False
-    if is_valid(verified_supplier_val):
-        if isinstance(verified_supplier_val, bool):
-            is_verified_only = verified_supplier_val
-        elif isinstance(verified_supplier_val, str):
-            is_verified_only = verified_supplier_val.strip().lower() == "true"
+    print(
+        "Applying Alibaba filters:",
+        f"margin={has_margin}",
+        f"moq={has_moq}",
+        f"rating={has_rating}",
+        f"verified={is_verified_only}",
+    )
+    print(f"Rows before filtering: {len(df)}")
 
-    print(f"📊 Rows before filtering: {len(df)}")
+    keep = pd.Series(True, index=df.index)
 
-    median_price = None
-    if has_margin and not df.empty:
+    if has_margin:
         median_price = df["alibaba_price_min_usd"].dropna().median()
+        if pd.isna(median_price):
+            print("WARN margin filter skipped — no usable prices for median")
+        else:
+            max_allowed = median_price * (1 - float(margin_min))
+            keep &= df["alibaba_price_min_usd"].notna()
+            keep &= df["alibaba_price_min_usd"] <= max_allowed
 
-    filtered_rows = []
-    for _, row in df.iterrows():
-        price   = row.get("alibaba_price_min_usd")
-        moq     = row.get("moq")
-        rating  = row.get("supplier_rating")
-        verified = row.get("is_verified_supplier")
+    if has_moq:
+        keep &= df["moq"].notna()
+        keep &= df["moq"] <= int(moq_max)
 
-        # PRICE / MARGIN
-        if has_margin:
-            if price is None or pd.isna(price) or median_price is None or pd.isna(median_price):
-                continue
-            try:
-                if price > median_price * (1 - float(margin_min)):
-                    continue
-            except Exception as exc:
-                print(f"WARN margin check: {exc}")
-                continue
+    if has_rating:
+        keep &= df["supplier_rating"].notna()
+        keep &= df["supplier_rating"] >= float(min_rating)
 
-        # MOQ
-        if has_moq:
-            if moq is None or pd.isna(moq):
-                continue
-            try:
-                if int(moq) > int(moq_max):
-                    continue
-            except Exception as exc:
-                print(f"WARN MOQ check: {exc}")
-                continue
+    if is_verified_only:
+        keep &= df["is_verified_supplier"].fillna(False).astype(bool)
 
-        # SUPPLIER RATING
-        if has_rating:
-            if rating is None or pd.isna(rating):
-                continue
-            try:
-                if float(rating) < float(min_rating):
-                    continue
-            except Exception as exc:
-                print(f"WARN rating check: {exc}")
-                continue
-
-        # VERIFIED SUPPLIER
-        if is_verified_only:
-            if not verified:
-                continue
-
-        filtered_rows.append(row)
-
-    df_filtered = pd.DataFrame(filtered_rows)
-    print(f"📊 Rows after filtering: {len(df_filtered)}")
+    df_filtered = df[keep].reset_index(drop=True)
+    print(f"Rows after filtering: {len(df_filtered)}")
     return df_filtered
 
 
@@ -499,9 +487,14 @@ def s3_json_to_table(input_bucket, input_key, output_bucket, output_key, filters
     # ── Apply filters ─────────────────────────────────────────────────────────
     df = apply_alibaba_filters(df, filters)
 
-    # ── Hard cap on row count ─────────────────────────────────────────────────
+    # ── Hard cap on row count (size=0 / null = no cap, same as fetch lambdas) ─
     size = filters.get("size")
-    if isinstance(size, int) and size >= 0:
+    try:
+        size = int(size) if size is not None else None
+    except (TypeError, ValueError):
+        size = None
+    if size is not None and size > 0:
+        print(f"Applying results cap: {size}")
         df = df[:size]
 
     filtered_count = len(df)
@@ -564,12 +557,12 @@ def lambda_handler(event, context):
             search_category = None
 
         filters = {
-            "enable_alibaba":   event.get("enable_alibaba"),
-            "margin_min":       event.get("margin_min"),
-            "moq_max":          event.get("moq_max"),
-            "min_rating":       event.get("supplier_rating_min"),
-            "verified_supplier": event.get("verified_supplier", False),
-            "size":             event.get("size"),
+            "enable_alibaba":    event.get("enable_alibaba"),
+            "margin_min":        event.get("margin_min"),
+            "moq_max":           event.get("moq_max"),
+            "min_rating":        event.get("supplier_rating_min"),
+            "verified_supplier": event.get("verified_supplier"),
+            "size":              event.get("size"),
         }
 
         output_key = generate_output_key(input_key, search_mode)

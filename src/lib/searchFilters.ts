@@ -1,6 +1,8 @@
 export const DEFAULT_RESULTS_CAP = 10;
 export const DEFAULT_VARIANT_LIMIT = 10;
 export const MAX_VARIANT_LIMIT = 30;
+/** Max parallel category Step Function executions while batching variants */
+export const MAX_CATEGORY_CONCURRENT_EXECUTIONS = 5;
 
 /** UI `0` means “use the maximum allowed variant count” (30). */
 export function resolveVariantLimitMax(val: string | number | undefined | null): number {

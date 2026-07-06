@@ -16,6 +16,8 @@ export interface PipelineUserMessageContext {
   alibabaFilters?: boolean;
   /** Effective UI status — may differ from raw AWS pipeline_status */
   displayStatus?: string;
+  /** Resolver / synthetic summary message when stages are empty */
+  summaryMessage?: string;
 }
 
 const STAGE_LABELS: Record<string, string> = {
@@ -148,11 +150,29 @@ function stageFailures(stages: Record<string, StageMessageSource | undefined> | 
   });
 }
 
-/** Separate EMPTY stages (filtered out) from genuinely FAILED stages */
+/** Separate EMPTY stages from genuinely FAILED stages */
 function stageEmpties(stages: Record<string, StageMessageSource | undefined> | undefined) {
   return Object.entries(stages ?? {}).filter(([, s]) => {
     return String(s?.status ?? '').toUpperCase() === 'EMPTY';
   });
+}
+
+function isFilterEmptyStage(stage: StageMessageSource | undefined): boolean {
+  const msg = String(stage?.message ?? '').toLowerCase();
+  return (
+    msg.includes('remained after filtering') ||
+    msg.includes('after filtering') ||
+    msg.includes('filtered out')
+  );
+}
+
+function describeEmptyStage(stageKey: string, stage: StageMessageSource | undefined): string {
+  const label = STAGE_LABELS[stageKey] ?? stageKey.replace(/_/g, ' ');
+  if (isFilterEmptyStage(stage)) {
+    return `${label} results removed by active filters`;
+  }
+  const detail = resolveStageMessage(stage, `${label} returned no results`);
+  return `${label}: ${detail}`;
 }
 
 function stageHardFailures(stages: Record<string, StageMessageSource | undefined> | undefined) {
@@ -203,6 +223,9 @@ export function getPipelineUserMessage(ctx: PipelineUserMessageContext): string 
       const label = STAGE_LABELS[key] ?? key.replace(/_/g, ' ');
       return `${label} failed \u2014 ${resolveStageMessage(s, 'see stage card for details')}`;
     }
+    if (ctx.summaryMessage?.trim()) {
+      return formatPipelineStageMessage(ctx.summaryMessage, 'Pipeline execution failed');
+    }
     return 'Pipeline execution failed';
   }
 
@@ -213,11 +236,10 @@ export function getPipelineUserMessage(ctx: PipelineUserMessageContext): string 
     return `Core data collected \u2014 ${label} failed: ${resolveStageMessage(s, 'see details below')}`;
   }
 
-  // EMPTY stages = products were fetched but filtered out — distinct from a hard failure
+  // EMPTY stages — fetch returned nothing vs clean filtered everything out
   if (emptied.length > 0) {
-    const [key] = emptied[0];
-    const label = STAGE_LABELS[key] ?? key.replace(/_/g, ' ');
-    return `Core data collected \u2014 ${label} results removed by active filters`;
+    const [key, stage] = emptied[0];
+    return `Core data collected \u2014 ${describeEmptyStage(key, stage)}`;
   }
 
   if (effective === 'SUCCEEDED') {
@@ -239,6 +261,108 @@ export function getPipelineUserMessage(ctx: PipelineUserMessageContext): string 
   }
 
   return 'Pipeline finished';
+}
+
+const STAGE_INFERENCE_PATTERNS: Array<{ key: keyof typeof STAGE_LABELS; patterns: RegExp[] }> = [
+  {
+    key: 'keyword_planner',
+    patterns: [/keyword\s*planner/i, /kwp_/i, /keywordplanner/i, /google ads/i],
+  },
+  {
+    key: 'google_trends',
+    patterns: [/google\s*trends/i, /trends_/i, /pytrends/i],
+  },
+  {
+    key: 'amazon',
+    patterns: [/amazon/i, /amazonfetch/i],
+  },
+  {
+    key: 'alibaba',
+    patterns: [/alibaba/i, /alibabafetch/i, /alibabaclean/i],
+  },
+];
+
+/** Guess which pipeline stage failed from AWS / Step Functions error text */
+export function inferStageKeyFromFailureText(text: string): keyof typeof STAGE_LABELS | null {
+  for (const { key, patterns } of STAGE_INFERENCE_PATTERNS) {
+    if (patterns.some((pattern) => pattern.test(text))) {
+      return key;
+    }
+  }
+  return null;
+}
+
+function firstNonEmptyString(...values: unknown[]): string | null {
+  for (const value of values) {
+    if (typeof value === 'string' && value.trim()) {
+      return value.trim();
+    }
+  }
+  return null;
+}
+
+function parseCausePayload(cause: string | undefined | null): string | null {
+  if (!cause?.trim()) return null;
+  const trimmed = cause.trim();
+  try {
+    const parsed = JSON.parse(trimmed) as Record<string, unknown>;
+    const direct = firstNonEmptyString(parsed.errorMessage, parsed.message, parsed.Cause);
+    if (direct) return direct;
+
+    if (typeof parsed.Cause === 'string') {
+      try {
+        const nested = JSON.parse(parsed.Cause) as Record<string, unknown>;
+        const nestedMsg = firstNonEmptyString(nested.errorMessage, nested.message);
+        if (nestedMsg) return nestedMsg;
+      } catch {
+        // nested Cause is plain text
+        return parsed.Cause.trim();
+      }
+    }
+  } catch {
+    // cause is plain text
+  }
+  return trimmed;
+}
+
+/** Parse Step Functions error + cause into a user-facing failure message */
+export function parseAwsExecutionFailure(
+  error: string | undefined | null,
+  cause: string | undefined | null
+): { message: string; stageKey: keyof typeof STAGE_LABELS | null } {
+  const causeText = parseCausePayload(cause);
+  const combined = collapseMessageText([error, causeText].filter(Boolean).join(': '));
+
+  const formatted =
+    formatPipelineStageMessage(causeText, '') ||
+    formatPipelineStageMessage(combined, '') ||
+    formatPipelineStageMessage(error, '');
+
+  if (/timed?\s*out/i.test(combined) || error === 'States.Timeout') {
+    return {
+      message: formatted || 'Pipeline timed out before completing',
+      stageKey: inferStageKeyFromFailureText(combined),
+    };
+  }
+
+  if (error === 'States.TaskFailed' || /taskfailed/i.test(combined)) {
+    return {
+      message: formatted || 'A pipeline stage failed during execution',
+      stageKey: inferStageKeyFromFailureText(combined),
+    };
+  }
+
+  if (/aborted/i.test(combined) || error === 'ExecutionAborted') {
+    return {
+      message: formatted || 'Pipeline was aborted before completion',
+      stageKey: inferStageKeyFromFailureText(combined),
+    };
+  }
+
+  return {
+    message: formatted || 'Pipeline execution failed',
+    stageKey: inferStageKeyFromFailureText(combined),
+  };
 }
 
 /** @deprecated Use getPipelineUserMessage — kept for tests migrating */

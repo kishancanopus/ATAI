@@ -1,4 +1,7 @@
 import {
+  getPipelineUserMessage,
+  inferStageKeyFromFailureText,
+  parseAwsExecutionFailure,
   resolveStageMessage,
   type StageMessageSource,
 } from '@/lib/pipelineMessages';
@@ -178,14 +181,76 @@ export function hasPipelineStageData(summary: PipelineSummary | null | undefined
   return Object.keys(summary.stages).length > 0;
 }
 
+/** True when summary was created by the frontend 5-minute guard (not AWS) */
+export function isClientSyntheticTimeoutSummary(
+  summary: PipelineSummary | null | undefined
+): boolean {
+  if (!summary) return false;
+  const messages = [
+    summary.message,
+    summary.stages?.keyword_planner?.message,
+  ]
+    .filter(Boolean)
+    .map(String);
+  return messages.some((m) => m.includes('exceeded the execution time limit'));
+}
+
+/** True when local row may disagree with AWS and needs another status fetch */
+export function hasStaleCategoryExecutionStatus(exec: CategoryExecution): boolean {
+  if (!exec.execution_arn || exec.status === 'ABORTED') return false;
+
+  const awsStatus = String(exec.status ?? '').toUpperCase();
+  const summary = exec.pipeline_summary;
+  const hasStages = hasPipelineStageData(summary);
+
+  // Client-side timeout was applied before AWS was checked — always re-verify
+  if (awsStatus === 'TIMED_OUT' && isClientSyntheticTimeoutSummary(summary)) {
+    return true;
+  }
+
+  // AWS succeeded but resolver stages never loaded (or only synthetic failure shell)
+  if (awsStatus === 'SUCCEEDED' && !hasStages) {
+    return true;
+  }
+
+  // Local terminal failure with an ARN — verify against AWS before showing FAILED
+  if ((awsStatus === 'FAILED' || awsStatus === 'TIMED_OUT') && !hasStages) {
+    return true;
+  }
+
+  // Synthetic FAILED summary while AWS reports success
+  if (awsStatus === 'SUCCEEDED' && summary?.pipeline_status === 'FAILED' && !hasStages) {
+    return true;
+  }
+
+  return false;
+}
+
+/** Resolve the best pipeline summary from a DescribeExecution payload */
+export function resolveExecutionPipelineSummary(
+  data: ExecutionStatusResponse
+): PipelineSummary | null {
+  return (
+    normalizePipelineSummary(data.pipeline_summary) ??
+    extractPartialPipelineSummaryFromOutput(data.output)
+  );
+}
+
 /** True while a child occupies a concurrent trigger slot (batch limit) */
 export function isCategoryExecutionInFlight(exec: CategoryExecution): boolean {
   if (exec.status === 'PENDING' || exec.status === 'FAILED' || exec.status === 'ABORTED') {
     return false;
   }
-  if (isTerminalAwsStatus(exec.status)) return false;
-  // Resolver summary present — done for slot counting even if AWS status string is stale
-  if (exec.pipeline_summary?.pipeline_status) return false;
+  if (isTerminalAwsStatus(exec.status) && !hasStaleCategoryExecutionStatus(exec)) {
+    return false;
+  }
+  // Resolver summary with stage data — done for slot counting even if AWS status string is stale
+  if (
+    exec.pipeline_summary?.pipeline_status &&
+    hasPipelineStageData(exec.pipeline_summary)
+  ) {
+    return false;
+  }
   // Only AWS RUNNING with a known ARN occupies a concurrent slot (max 5)
   if (!exec.execution_arn) return false;
   return exec.status === 'RUNNING';
@@ -193,11 +258,16 @@ export function isCategoryExecutionInFlight(exec: CategoryExecution): boolean {
 
 /** True when no further Step Function polling is needed for this child */
 export function isCategoryExecutionSettled(exec: CategoryExecution): boolean {
-  if (exec.status === 'FAILED' || exec.status === 'ABORTED' || exec.status === 'TIMED_OUT') {
+  if (exec.status === 'ABORTED') return true;
+  if (needsBusinessSummaryRefresh(exec)) return false;
+
+  if (exec.status === 'FAILED' || exec.status === 'TIMED_OUT') {
     return true;
   }
   if (isTerminalAwsStatus(exec.status)) return true;
-  if (exec.pipeline_summary?.pipeline_status) return true;
+  if (exec.pipeline_summary?.pipeline_status && hasPipelineStageData(exec.pipeline_summary)) {
+    return true;
+  }
   return false;
 }
 
@@ -235,6 +305,11 @@ export function mergeCategoryExecutionRow(
   existing: CategoryExecution,
   incoming: Partial<CategoryExecution>
 ): CategoryExecution {
+  // User-aborted rows must not be overwritten by stale AWS polls
+  if (existing.status === 'ABORTED' && incoming.status !== 'ABORTED') {
+    return existing;
+  }
+
   const merged: CategoryExecution = {
     ...existing,
     ...incoming,
@@ -264,10 +339,23 @@ export function mergeCategoryExecutionRow(
   }
 
   if (existing.pipeline_summary?.pipeline_status && !incoming.pipeline_summary?.pipeline_status) {
-    merged.pipeline_summary = existing.pipeline_summary;
-    merged.pipeline_status = existing.pipeline_status ?? existing.pipeline_summary.pipeline_status;
+    const incomingAws = String(incoming.status ?? merged.status ?? '').toUpperCase();
+    // A successful AWS poll without parsed summary should not keep a stale FAILED shell
+    if (incomingAws !== 'SUCCEEDED') {
+      merged.pipeline_summary = existing.pipeline_summary;
+      merged.pipeline_status =
+        existing.pipeline_status ?? existing.pipeline_summary.pipeline_status;
+    }
   } else if (incoming.pipeline_summary?.pipeline_status) {
     merged.pipeline_status = incoming.pipeline_summary.pipeline_status;
+    // Successful AWS poll replaces stale local failure / client timeout state
+    if (
+      incoming.status === 'SUCCEEDED' &&
+      (existing.status === 'TIMED_OUT' ||
+        existing.pipeline_summary?.pipeline_status === 'FAILED')
+    ) {
+      merged.status = 'SUCCEEDED';
+    }
   }
 
   if (existing.started_at && incoming.started_at === undefined) {
@@ -307,12 +395,29 @@ export function categoryExecutionFromStatusApi(
   existing: CategoryExecution,
   data: ExecutionStatusResponse
 ): CategoryExecution {
-  const summary = normalizePipelineSummary(data.pipeline_summary);
+  const awsStatus = data.status || existing.status;
+  let summary = resolveExecutionPipelineSummary(data);
+
+  // Never invent a failure summary for a successful Step Functions execution
+  if (!summary && awsStatus === 'SUCCEEDED') {
+    summary = null;
+  } else if (
+    !summary &&
+    isTerminalAwsStatus(awsStatus) &&
+    awsStatus !== 'SUCCEEDED'
+  ) {
+    summary = buildPipelineSummaryFromExecutionFailure(data);
+  }
+
   return mergeCategoryExecutionRow(existing, {
     keyword: existing.keyword,
-    status: data.status || existing.status,
+    status: awsStatus,
     pipeline_summary: summary ?? existing.pipeline_summary ?? null,
-    pipeline_status: summary?.pipeline_status ?? existing.pipeline_status ?? null,
+    pipeline_status:
+      summary?.pipeline_status ??
+      (awsStatus === 'SUCCEEDED' ? existing.pipeline_status : null) ??
+      existing.pipeline_status ??
+      null,
   });
 }
 
@@ -360,19 +465,343 @@ export function isCategoryBatchReadyToComplete(
 /** True when we should keep polling DescribeExecution for business summary */
 export function needsBusinessSummaryRefresh(exec: CategoryExecution): boolean {
   if (!exec.execution_arn) return false;
-  if (exec.pipeline_summary?.pipeline_status) return false;
+  if (exec.status === 'ABORTED') return false;
   if (exec.status === 'PENDING' || exec.status === 'STARTING') return false;
-  // Only refresh for RUNNING or SUCCEEDED executions.
-  // FAILED, TIMED_OUT, and ABORTED executions won't have successful summaries to fetch.
-  return exec.status === 'SUCCEEDED' || exec.status === 'RUNNING';
+
+  if (!exec.pipeline_summary?.pipeline_status) {
+    return (
+      exec.status === 'RUNNING' ||
+      exec.status === 'SUCCEEDED' ||
+      isTerminalAwsStatus(exec.status)
+    );
+  }
+
+  return hasStaleCategoryExecutionStatus(exec);
+}
+
+function stageSummaryFromRaw(
+  primary: unknown,
+  fallback: unknown,
+  defaultName: StageKey
+): StageSummary {
+  const stageObj =
+    primary && typeof primary === 'object'
+      ? primary
+      : fallback && typeof fallback === 'object'
+        ? fallback
+        : null;
+
+  if (!stageObj) {
+    return {
+      stage: defaultName,
+      status: 'SKIPPED',
+      message: `${STAGE_LABELS[defaultName] ?? defaultName} stage skipped`,
+      rows: 0,
+    };
+  }
+
+  const record = stageObj as Record<string, unknown>;
+  const status = String(record.status ?? 'SKIPPED');
+  return {
+    stage: defaultName,
+    status,
+    message: resolveStageMessage(
+      record as StageMessageSource,
+      `${STAGE_LABELS[defaultName] ?? defaultName} ${status.toLowerCase()}`
+    ),
+    rows: Number(record.rows ?? record.rows_processed ?? 0),
+  };
+}
+
+const STAGE_LABELS: Record<StageKey, string> = {
+  keyword_planner: 'Keyword Planner',
+  google_trends: 'Google Trends',
+  amazon: 'Amazon',
+  alibaba: 'Alibaba',
+};
+
+function computePipelineStatusFromStages(
+  stages: Partial<Record<StageKey, StageSummary>>
+): PipelineStatus {
+  const statuses = Object.values(stages)
+    .filter((s): s is StageSummary => !!s)
+    .map((s) => String(s.status ?? '').toUpperCase());
+
+  if (statuses.length === 0) return 'FAILED';
+
+  const failedCount = statuses.filter((s) => s === 'FAILED').length;
+  const partialCount = statuses.filter((s) => s === 'EMPTY' || s === 'SKIPPED').length;
+
+  if (failedCount === statuses.length) return 'FAILED';
+  if (failedCount > 0 || partialCount > 0) return 'PARTIALLY_SUCCEEDED';
+  return 'SUCCEEDED';
+}
+
+/** Build resolver-style summary from raw Step Function output when resolver did not run */
+export function extractPartialPipelineSummaryFromOutput(
+  output: string | undefined | null
+): PipelineSummary | null {
+  if (!output?.trim()) return null;
+
+  try {
+    let parsed: unknown = JSON.parse(output);
+    if (typeof parsed === 'string') {
+      parsed = JSON.parse(parsed);
+    }
+    if (!parsed || typeof parsed !== 'object') return null;
+
+    const root = parsed as Record<string, unknown>;
+    if (root.pipeline_summary) {
+      return normalizePipelineSummary(root.pipeline_summary);
+    }
+
+    const amazonStage =
+      root.amazon_fcl ?? root.amazon_clean ?? root.amazon_fetch ?? null;
+
+    const stages: Partial<Record<StageKey, StageSummary>> = {
+      keyword_planner: stageSummaryFromRaw(root.kwp_clean, root.kwp_fetch, 'keyword_planner'),
+      google_trends: stageSummaryFromRaw(root.trends_clean, root.trends_fetch, 'google_trends'),
+      amazon: stageSummaryFromRaw(amazonStage, null, 'amazon'),
+      alibaba: stageSummaryFromRaw(root.alibaba_clean, root.alibaba_fetch, 'alibaba'),
+    };
+
+    const hasAnyStage = Object.values(stages).some(
+      (s) => s && String(s.status).toUpperCase() !== 'SKIPPED'
+    );
+    if (!hasAnyStage) return null;
+
+    const pipeline_status = computePipelineStatusFromStages(stages);
+    return {
+      pipeline_status,
+      message: `Pipeline execution completed with status ${pipeline_status}`,
+      stages,
+      generated_at: new Date().toISOString(),
+    };
+  } catch {
+    return null;
+  }
+}
+
+/** Synthetic summary when trigger never received an execution ARN */
+export function buildTriggerFailureSummary(reason: string): PipelineSummary {
+  const message = resolveStageMessage(
+    { status: 'FAILED', message: reason },
+    'Pipeline trigger failed — could not start Step Function execution'
+  );
+  return {
+    pipeline_status: 'FAILED',
+    message,
+    generated_at: new Date().toISOString(),
+    stages: {
+      keyword_planner: {
+        stage: 'keyword_planner',
+        status: 'FAILED',
+        message,
+        rows: 0,
+      },
+    },
+  };
+}
+
+/** Synthetic summary when a child execution exceeds the client-side wait window */
+export function buildTimeoutFailureSummary(keyword?: string): PipelineSummary {
+  const message = keyword
+    ? `Pipeline timed out for "${keyword}" — exceeded the execution time limit`
+    : 'Pipeline timed out — exceeded the execution time limit';
+  return {
+    pipeline_status: 'FAILED',
+    message,
+    generated_at: new Date().toISOString(),
+    stages: {
+      keyword_planner: {
+        stage: 'keyword_planner',
+        status: 'FAILED',
+        message,
+        rows: 0,
+      },
+    },
+  };
+}
+
+/** Synthetic summary when the user aborts a running category child */
+export function buildAbortedFailureSummary(keyword?: string): PipelineSummary {
+  const message = keyword
+    ? `Pipeline aborted by user for "${keyword}"`
+    : 'Pipeline aborted by user before completion';
+  return {
+    pipeline_status: 'FAILED',
+    message,
+    generated_at: new Date().toISOString(),
+    stages: {
+      keyword_planner: {
+        stage: 'keyword_planner',
+        status: 'FAILED',
+        message,
+        rows: 0,
+      },
+    },
+  };
+}
+
+/** True when a category child still has an active Step Functions execution to stop */
+export function shouldStopCategoryExecution(exec: CategoryExecution): boolean {
+  const arn = exec.execution_arn?.trim();
+  if (!arn || arn.startsWith('category_search:')) return false;
+  return !isTerminalAwsStatus(exec.status);
+}
+
+/** True when a category child was cancelled before/during execution */
+export function isCategoryExecutionAbortable(exec: CategoryExecution): boolean {
+  const status = String(exec.status ?? '').toUpperCase();
+  return (
+    status === 'PENDING' ||
+    status === 'STARTING' ||
+    status === 'RUNNING' ||
+    shouldStopCategoryExecution(exec)
+  );
+}
+
+/** UI may load per-variant stage panels (including after user abort) */
+export function canBrowseCategoryVariantDetails(pipelineStatus: string): boolean {
+  return (
+    pipelineStatus === 'COMPLETED' ||
+    pipelineStatus === 'POLLING' ||
+    pipelineStatus === 'FAILED'
+  );
+}
+
+/** True when this keyword never received a Step Function execution ARN */
+export function isCategoryVariantUnprocessed(exec: CategoryExecution | null | undefined): boolean {
+  if (!exec) return true;
+  if (exec.status === 'ABORTED' && !exec.execution_arn?.trim()) return true;
+  if (exec.status === 'PENDING' && !exec.execution_arn?.trim()) return true;
+  return false;
+}
+
+/** Build a user-facing summary from AWS terminal status when resolver output is missing */
+export function buildPipelineSummaryFromExecutionFailure(
+  data: ExecutionStatusResponse
+): PipelineSummary {
+  const fromOutput =
+    extractPartialPipelineSummaryFromOutput(data.output) ??
+    normalizePipelineSummary(data.pipeline_summary);
+  if (fromOutput) return fromOutput;
+
+  const parsed = parseAwsExecutionFailure(data.error, data.cause);
+  const stageKey = (parsed.stageKey ??
+    inferStageKeyFromFailureText(parsed.message) ??
+    'keyword_planner') as StageKey;
+  const stageLabel = STAGE_LABELS[stageKey];
+
+  const awsStatus = String(data.status ?? '').toUpperCase();
+  let message = parsed.message;
+  if (awsStatus === 'TIMED_OUT') {
+    message = parsed.message.includes('timed out')
+      ? parsed.message
+      : 'Pipeline timed out before completing';
+  } else if (awsStatus === 'ABORTED') {
+    message = parsed.message.includes('abort')
+      ? parsed.message
+      : 'Pipeline was aborted before completion';
+  }
+
+  return {
+    pipeline_status: 'FAILED',
+    message,
+    generated_at: new Date().toISOString(),
+    stages: {
+      [stageKey]: {
+        stage: stageKey,
+        status: 'FAILED',
+        message: `${stageLabel} failed — ${message}`,
+        rows: 0,
+      },
+    },
+  };
+}
+
+/** True when the Step Functions execution itself failed or was aborted */
+export function isCategoryExecutionAwsFailed(exec: CategoryExecution | null | undefined): boolean {
+  if (!exec) return false;
+  const status = String(exec.status ?? '').toUpperCase();
+  return status === 'FAILED' || status === 'TIMED_OUT' || status === 'ABORTED';
+}
+
+type StageSummaryLike = {
+  status?: string | null;
+  message?: string | null;
+  error?: string | null;
+  rows?: number | null;
+  rows_processed?: number | null;
+};
+
+/** Resolve a stage object from pipeline summary stages map */
+export function getResolverStageFromSummary(
+  stages: PipelineSummary['stages'] | null | undefined,
+  stageKey: string
+): StageSummaryLike | null {
+  if (!stages) return null;
+
+  const aliases: Record<string, string[]> = {
+    keyword_planner: ['keyword_planner', 'keyword_planner_clean', 'google_keyword_planner'],
+    google_trends: ['google_trends', 'google_trends_clean', 'trends'],
+    amazon: ['amazon', 'amazon_clean', 'amazon_fcl_enrichment'],
+    alibaba: ['alibaba', 'alibaba_clean', 'alibaba_enrichment'],
+  };
+
+  for (const key of aliases[stageKey] ?? [stageKey]) {
+    const stage = stages[key];
+    if (stage) return stage;
+  }
+  return null;
+}
+
+/** One-line tracker message for a category child execution */
+export function getCategoryExecutionUserMessage(
+  exec: CategoryExecution,
+  filters: MarketplaceFilterConfig
+): string {
+  const displayStatus = getCategoryExecutionDisplayStatus(exec, filters);
+
+  if (exec.pipeline_summary) {
+    return getPipelineUserMessage({
+      pipelineStatus: exec.pipeline_summary.pipeline_status,
+      stages: exec.pipeline_summary.stages,
+      amazonFilters: filters.amazonFilters,
+      alibabaFilters: filters.alibabaFilters,
+      displayStatus,
+      summaryMessage: exec.pipeline_summary.message,
+    });
+  }
+
+  if (displayStatus === 'RUNNING' && isTerminalAwsStatus(exec.status)) {
+    return 'Finalizing pipeline results...';
+  }
+  if (displayStatus === 'RUNNING') return 'Pipeline in progress...';
+  if (displayStatus === 'PENDING') return 'Waiting to start...';
+
+  if (displayStatus === 'FAILED' || displayStatus === 'ABORTED') {
+    if (!exec.execution_arn) {
+      return 'Pipeline trigger failed — could not start Step Function execution';
+    }
+    if (exec.status === 'TIMED_OUT') {
+      return 'Pipeline timed out — keyword exceeded the execution time limit';
+    }
+    if (exec.status === 'ABORTED') {
+      return 'Pipeline aborted before completion';
+    }
+    return 'Pipeline execution failed — no detailed stage output was returned';
+  }
+
+  return '—';
 }
 
 /** Resolve business pipeline status for a category child execution */
 export function getCategoryExecutionPipelineStatus(
   exec: CategoryExecution
 ): PipelineStatus | 'RUNNING' | 'PENDING' | 'ABORTED' | 'FAILED' {
-  if (exec.pipeline_summary?.pipeline_status) {
-    return exec.pipeline_summary.pipeline_status;
+  if (exec.status === 'ABORTED') {
+    return 'ABORTED';
   }
 
   if (exec.status === 'STARTING') {
@@ -392,13 +821,34 @@ export function getCategoryExecutionPipelineStatus(
     return 'FAILED';
   }
 
-  // AWS SUCCEEDED but resolver summary not loaded yet
-  if (exec.execution_arn && exec.status === 'SUCCEEDED' && !exec.pipeline_summary) {
+  const awsStatus = String(exec.status ?? '').toUpperCase();
+  const hasStages = hasPipelineStageData(exec.pipeline_summary);
+
+  // Step Functions succeeded — use resolver output once loaded
+  if (awsStatus === 'SUCCEEDED') {
+    if (exec.pipeline_summary?.pipeline_status && hasStages) {
+      return exec.pipeline_summary.pipeline_status;
+    }
     return 'RUNNING';
   }
 
-  if (exec.status === 'ABORTED' || exec.status === 'TIMED_OUT') {
-    return exec.status === 'ABORTED' ? 'ABORTED' : 'FAILED';
+  // AWS terminal failure — show FAILED once verified (only defer while stale/local timeout)
+  if (awsStatus === 'FAILED' || awsStatus === 'TIMED_OUT') {
+    if (hasStaleCategoryExecutionStatus(exec)) {
+      return 'RUNNING';
+    }
+    if (exec.pipeline_summary?.pipeline_status && hasStages) {
+      return exec.pipeline_summary.pipeline_status;
+    }
+    return 'FAILED';
+  }
+
+  if (exec.pipeline_summary?.pipeline_status && hasStages) {
+    return exec.pipeline_summary.pipeline_status;
+  }
+
+  if (awsStatus === 'TIMED_OUT') {
+    return 'FAILED';
   }
 
   const business = getBusinessPipelineStatus(exec.status, exec.pipeline_summary);

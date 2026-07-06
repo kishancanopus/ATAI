@@ -8,6 +8,8 @@ import {
 } from "@aws-sdk/client-sfn";
 import {
     ExecutionStatusResponse,
+    extractPartialPipelineSummaryFromOutput,
+    isTerminalAwsStatus,
     normalizePipelineSummary,
     PipelineSummary,
 } from "@/types/pipeline";
@@ -340,7 +342,11 @@ function extractPipelineSummaryFromOutput(output: string | undefined): PipelineS
         }
 
         // Resolver payload at root (defensive)
-        return normalizePipelineSummary(root);
+        const fromRoot = normalizePipelineSummary(root);
+        if (fromRoot) return fromRoot;
+
+        // Fall back to stage objects on the full Step Function output envelope
+        return extractPartialPipelineSummaryFromOutput(output);
     } catch (e) {
         console.error("Error parsing pipeline execution output:", e);
         return null;
@@ -364,14 +370,13 @@ export async function getExecutionStatus(executionArn: string): Promise<Executio
     });
 
     const response = await sfnClient.send(command);
-    const pipeline_summary = extractPipelineSummaryFromOutput(response.output);
 
     return {
         status: response.status ?? 'UNKNOWN', // RUNNING, SUCCEEDED, FAILED, TIMED_OUT, ABORTED
         startDate: response.startDate,
         stopDate: response.stopDate,
         output: response.output,
-        pipeline_summary,
+        pipeline_summary: extractPipelineSummaryFromOutput(response.output),
         error: response.error,
         cause: response.cause,
     };
@@ -382,12 +387,51 @@ export async function stopPipelineExecution(executionArn: string) {
         return new Date();
     }
 
+    const describe = new DescribeExecutionCommand({ executionArn });
+    const existing = await sfnClient.send(describe);
+
+    if (existing.status && isTerminalAwsStatus(existing.status)) {
+        return existing.stopDate ?? new Date();
+    }
+
     const command = new StopExecutionCommand({
         executionArn,
     });
 
     const response = await sfnClient.send(command);
-    return response.stopDate;
+    return response.stopDate ?? new Date();
+}
+
+export async function stopPipelineExecutions(executionArns: string[]): Promise<{
+    stopped: string[];
+    skipped: string[];
+    failed: Array<{ arn: string; error: string }>;
+}> {
+    const unique = [
+        ...new Set(
+            executionArns.filter((arn) => arn?.trim() && !arn.startsWith('category_search:'))
+        ),
+    ];
+
+    const stopped: string[] = [];
+    const skipped: string[] = [];
+    const failed: Array<{ arn: string; error: string }> = [];
+
+    await Promise.all(
+        unique.map(async (arn) => {
+            try {
+                await stopPipelineExecution(arn);
+                stopped.push(arn);
+            } catch (error) {
+                failed.push({
+                    arn,
+                    error: error instanceof Error ? error.message : String(error),
+                });
+            }
+        })
+    );
+
+    return { stopped, skipped, failed };
 }
 
 import { ListObjectsV2Command } from "@aws-sdk/client-s3";

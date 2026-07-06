@@ -15,20 +15,33 @@ import {
   getPipelineUserMessage,
   resolveStageMessage,
 } from '@/lib/pipelineMessages';
-import { resolveResultsCap, resolveVariantLimitMax } from '@/lib/searchFilters';
+import {
+  MAX_CATEGORY_CONCURRENT_EXECUTIONS,
+  resolveResultsCap,
+  resolveVariantLimitMax,
+} from '@/lib/searchFilters';
 import {
   applyCategoryExecutionUpdates,
   categoryKeywordKey,
+  buildAbortedFailureSummary,
   buildCategoryBatchSummary,
+  buildTriggerFailureSummary,
   CategoryExecution,
   categoryExecutionFromStatusApi,
   ExecutionStatusResponse,
   getBusinessPipelineStatus,
   getCategoryExecutionDisplayStatus,
+  getCategoryExecutionUserMessage,
   getEffectivePipelineStatus,
   getCategoryExecutionPipelineStatus,
   getPipelineStatusBadgeClasses,
+  getResolverStageFromSummary,
+  isCategoryExecutionAbortable,
+  isCategoryVariantUnprocessed,
+  canBrowseCategoryVariantDetails,
+  isCategoryExecutionAwsFailed,
   isTerminalAwsStatus,
+  hasStaleCategoryExecutionStatus,
   mergeCategoryExecutionRow,
   normalizePipelineSummary,
   PipelineSummary,
@@ -40,6 +53,7 @@ import {
   areAllCategoryExecutionsFinished,
   countInFlightCategoryExecutions,
   isCategoryExecutionInFlight,
+  shouldStopCategoryExecution,
 } from '@/types/pipeline';
 
 // Countries with geo codes - moved outside component since it's static
@@ -382,24 +396,15 @@ const Dashboard = () => {
     async (executions: CategoryExecution[]): Promise<CategoryExecution[]> => {
       return Promise.all(
         executions.map(async (exec) => {
-          if (isTerminalAwsStatus(exec.status) && !needsBusinessSummaryRefresh(exec)) {
-            return exec;
-          }
-
-          const now = Date.now();
-          if (
-            exec.started_at &&
-            now - exec.started_at > 5 * 60 * 1000 &&
-            (exec.status === 'RUNNING' || exec.status === 'STARTING')
-          ) {
-            return mergeCategoryExecutionRow(exec, {
-              keyword: exec.keyword,
-              status: 'TIMED_OUT',
-            });
-          }
+          if (exec.status === 'ABORTED') return exec;
 
           // ARN is assigned only by /api/pipeline/trigger — skip until trigger returns it
           if (!exec.execution_arn) return exec;
+
+          // Always prefer AWS DescribeExecution — do not apply a client-side timeout
+          if (isTerminalAwsStatus(exec.status) && !needsBusinessSummaryRefresh(exec)) {
+            return exec;
+          }
 
           try {
             const res = await fetch(
@@ -688,12 +693,54 @@ const Dashboard = () => {
   ]);
 
   const getStageStatusAndMeta = useCallback((stageKey: string) => {
+    const stageTitle = toTitleCase(stageKey.replace('_', ' '));
+
+    const buildStageReturn = (
+      stageObj: {
+        status?: string | null;
+        message?: string | null;
+        error?: string | null;
+        rows?: number | null;
+        rows_processed?: number | null;
+      },
+      loadedRows: number | null | undefined
+    ) => {
+      const summaryRows =
+        stageObj.rows !== undefined
+          ? stageObj.rows
+          : stageObj.rows_processed !== undefined
+            ? stageObj.rows_processed
+            : null;
+      const defaultMsg =
+        stageObj.status === 'FAILED' || stageObj.status === 'EMPTY'
+          ? `${stageTitle} stage failed`
+          : stageObj.status === 'SKIPPED'
+            ? `${stageTitle} stage skipped`
+            : `${stageTitle} stage completed`;
+      return {
+        status: stageObj.status || 'SUCCEEDED',
+        message: resolveStageMessage(stageObj, defaultMsg),
+        rows: resolveStageDisplayRows(stageKey, summaryRows, loadedRows ?? null),
+      };
+    };
+
+    const loadedRowsForStage =
+      stageKey === 'keyword_planner' && hasLoadedKeywordPlanner
+        ? keywordPlannerResults?.length
+        : stageKey === 'google_trends' && hasLoadedTrends
+          ? trendsResults?.length
+          : stageKey === 'amazon' && hasLoadedAmazon
+            ? amazonResults?.length
+            : stageKey === 'alibaba' && hasLoadedAlibaba
+              ? alibabaResults?.length
+              : null;
+
     // If pipeline is idle/starting, all are pending
     if (pipelineStatus === 'IDLE' || pipelineStatus === 'STARTING') {
       return { status: 'PENDING', message: 'Waiting to start...', rows: null };
     }
 
-    // 1. Check if filters are disabled for this stage
+    // Check if filters are disabled for this stage
     if (stageKey === 'amazon' && !amazonFilters) {
       return { status: 'SKIPPED', message: 'Not enabled in search filters', rows: null };
     }
@@ -703,10 +750,33 @@ const Dashboard = () => {
 
     const variantSummary =
       activePipelineSummary ?? selectedCategoryExec?.pipeline_summary ?? null;
+    const categoryAwsFailed = isCategoryExecutionAwsFailed(selectedCategoryExec);
+    const categoryBusinessFailed = variantSummary?.pipeline_status === 'FAILED';
 
     // Category variant: use resolver stages when available; only show loading without summary
     if (isCategoryVariantView && !hasPipelineStageData(variantSummary)) {
-      if (isVariantFetching) {
+      if (categoryAwsFailed && selectedCategoryExec?.execution_arn) {
+        if (stageKey === 'keyword_planner') {
+          return {
+            status: 'FAILED',
+            message:
+              resolveStageMessage(
+                { status: 'FAILED', message: selectedCategoryExec.pipeline_summary?.message },
+                'Keyword Planner stage failed'
+              ),
+            rows: null,
+          };
+        }
+        return {
+          status: 'SKIPPED',
+          message: `${stageTitle} stage not reached — pipeline failed in Step Functions`,
+          rows: null,
+        };
+      }
+      if (
+        isVariantFetching ||
+        (selectedCategoryExec && hasStaleCategoryExecutionStatus(selectedCategoryExec))
+      ) {
         return {
           status: 'RUNNING',
           message: 'Loading pipeline status for this variant...',
@@ -722,53 +792,35 @@ const Dashboard = () => {
       }
     }
 
-    // 2. Resolve stage info from active pipeline summary if available
+    // Resolve stage info from active pipeline summary if available
     if (variantSummary && hasPipelineStageData(variantSummary)) {
-      const stages = variantSummary.stages;
-      let stageObj = null;
-      if (stageKey === 'keyword_planner') {
-        stageObj = stages.keyword_planner || stages.keyword_planner_clean || stages.google_keyword_planner;
-      } else if (stageKey === 'google_trends') {
-        stageObj = stages.google_trends || stages.google_trends_clean || stages.trends;
-      } else if (stageKey === 'amazon') {
-        stageObj = stages.amazon || stages.amazon_clean || stages.amazon_fcl_enrichment;
-      } else if (stageKey === 'alibaba') {
-        stageObj = stages.alibaba || stages.alibaba_clean || stages.alibaba_enrichment;
+      const stageObj = getResolverStageFromSummary(variantSummary.stages, stageKey);
+      if (stageObj) {
+        return buildStageReturn(stageObj, loadedRowsForStage);
       }
 
-      if (stageObj) {
-        const summaryRows =
-          stageObj.rows !== undefined
-            ? stageObj.rows
-            : stageObj.rows_processed !== undefined
-              ? stageObj.rows_processed
-              : null;
-        const loadedRows =
-          stageKey === 'keyword_planner' && hasLoadedKeywordPlanner
-            ? keywordPlannerResults?.length
-            : stageKey === 'google_trends' && hasLoadedTrends
-              ? trendsResults?.length
-              : stageKey === 'amazon' && hasLoadedAmazon
-                ? amazonResults?.length
-                : stageKey === 'alibaba' && hasLoadedAlibaba
-                  ? alibabaResults?.length
-                  : null;
-        const defaultMsg =
-          stageObj.status === 'FAILED' || stageObj.status === 'EMPTY'
-            ? `${toTitleCase(stageKey.replace('_', ' '))} stage failed`
-            : stageObj.status === 'SKIPPED'
-              ? `${toTitleCase(stageKey.replace('_', ' '))} stage skipped`
-              : `${toTitleCase(stageKey.replace('_', ' '))} stage completed`;
+      if (categoryAwsFailed || categoryBusinessFailed) {
         return {
-          status: stageObj.status || 'SUCCEEDED',
-          message: resolveStageMessage(stageObj, defaultMsg),
-          rows: resolveStageDisplayRows(stageKey, summaryRows, loadedRows ?? null),
+          status: 'SKIPPED',
+          message: `${stageTitle} stage not reached — pipeline failed before this step`,
+          rows: null,
         };
       }
     }
 
-    // 3. Fallback to dynamic local state while polling (running)
+    // Fallback to dynamic local state while polling (running)
     if (pipelineStatus === 'POLLING') {
+      if (isCategoryVariantView && (categoryAwsFailed || categoryBusinessFailed)) {
+        if (stageKey === 'keyword_planner') {
+          return { status: 'FAILED', message: 'Keyword Planner stage failed', rows: null };
+        }
+        return {
+          status: 'SKIPPED',
+          message: `${stageTitle} stage not reached — pipeline failed earlier`,
+          rows: null,
+        };
+      }
+
       if (stageKey === 'keyword_planner') {
         if (hasLoadedKeywordPlanner) {
           return { status: 'SUCCEEDED', message: keywordPlannerMeta?.message || 'Keyword Planner clean completed', rows: keywordPlannerResults?.length || null };
@@ -805,39 +857,37 @@ const Dashboard = () => {
       }
     }
 
-    // 4. Category variant: stage tables loaded but resolver stage entry missing — use S3 meta
+    // Category variant completed: never infer SUCCESS from S3 alone when AWS/business failed
     if (isCategoryVariantView && pipelineStatus === 'COMPLETED') {
-      if (stageKey === 'keyword_planner' && hasLoadedKeywordPlanner) {
+      if (categoryAwsFailed || categoryBusinessFailed) {
+        const stageObj = getResolverStageFromSummary(variantSummary?.stages, stageKey);
+        if (stageObj) {
+          return buildStageReturn(stageObj, loadedRowsForStage);
+        }
+        if (stageKey === 'keyword_planner') {
+          return {
+            status: 'FAILED',
+            message:
+              variantSummary?.message ||
+              selectedCategoryExec?.pipeline_summary?.message ||
+              'Keyword Planner stage failed',
+            rows: null,
+          };
+        }
         return {
-          status: 'SUCCEEDED',
-          message: keywordPlannerMeta?.message || 'Keyword Planner stage completed',
-          rows: keywordPlannerResults?.length ?? activePipelineSummary?.stages?.keyword_planner?.rows ?? null,
+          status: 'SKIPPED',
+          message: `${stageTitle} stage not reached — pipeline failed in Step Functions`,
+          rows: null,
         };
       }
-      if (stageKey === 'google_trends' && hasLoadedTrends) {
-        return {
-          status: 'SUCCEEDED',
-          message: trendsMeta?.message || 'Google Trends stage completed',
-          rows: trendsResults?.length ?? activePipelineSummary?.stages?.google_trends?.rows ?? null,
-        };
-      }
-      if (stageKey === 'amazon' && hasLoadedAmazon) {
-        return {
-          status: 'SUCCEEDED',
-          message: amazonMeta?.message || 'Amazon stage completed',
-          rows: amazonResults?.length ?? activePipelineSummary?.stages?.amazon?.rows ?? null,
-        };
-      }
-      if (stageKey === 'alibaba' && hasLoadedAlibaba) {
-        return {
-          status: 'SUCCEEDED',
-          message: alibabaMeta?.message || 'Alibaba stage completed',
-          rows: alibabaResults?.length ?? activePipelineSummary?.stages?.alibaba?.rows ?? null,
-        };
+
+      const stageObj = getResolverStageFromSummary(variantSummary?.stages, stageKey);
+      if (stageObj) {
+        return buildStageReturn(stageObj, loadedRowsForStage);
       }
     }
 
-    // 5. If pipeline is completed but stageObj wasn't found (manual mode / legacy)
+    // If pipeline is completed but stageObj wasn't found (manual mode / legacy)
     if (pipelineStatus === 'COMPLETED' && !isCategoryVariantView) {
       if (stageKey === 'keyword_planner') {
         return { status: 'SUCCEEDED', message: 'Keyword Planner stage completed', rows: keywordPlannerResults?.length || null };
@@ -891,7 +941,8 @@ const Dashboard = () => {
     hasLoadedKeywordPlanner, keywordPlannerMeta, keywordPlannerResults,
     hasLoadedTrends, trendsMeta, trendsResults,
     hasLoadedAmazon, amazonMeta, amazonResults,
-    hasLoadedAlibaba, alibabaMeta, alibabaResults
+    hasLoadedAlibaba, alibabaMeta, alibabaResults,
+    selectedCategoryExec,
   ]);
 
   const renderStageCard = (
@@ -1115,7 +1166,7 @@ const Dashboard = () => {
               </svg>
             )}
             {renderStageCard(
-              'Amazon USA',
+              'Amazon',
               getStageStatusAndMeta('amazon').status,
               getStageStatusAndMeta('amazon').message,
               getStageStatusAndMeta('amazon').rows,
@@ -1890,26 +1941,49 @@ const Dashboard = () => {
     // 1. Signal any running frontend loop to stop
     cancelTokenRef.current = true;
 
-    // 2. If it's the Category Based frontend loop, stop the loop and any running child executions
+    // 2. Category Based mode — stop every active child Step Function execution
     if (executionArn && executionArn.startsWith('category_search:frontend_managed:')) {
-      categoryExecutions.forEach(exec => {
-        if (exec.status === 'RUNNING' && exec.execution_arn) {
-          fetch(`/api/pipeline/stop?arn=${encodeURIComponent(exec.execution_arn)}`, { method: 'POST' }).catch(() => { });
+      const activeExecutions = categoryExecutionsRef.current.filter(shouldStopCategoryExecution);
+      const arnsToStop = activeExecutions.map((exec) => exec.execution_arn);
+
+      if (arnsToStop.length > 0) {
+        try {
+          const response = await fetch('/api/pipeline/stop-batch', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ arns: arnsToStop }),
+          });
+          const data = await response.json().catch(() => ({}));
+          if (!response.ok) {
+            console.error('Batch stop API returned an error:', data);
+          } else {
+            console.log(
+              `Stopped ${data.stopped?.length ?? 0} category execution(s)`,
+              data.failed?.length ? data.failed : ''
+            );
+          }
+        } catch (error) {
+          console.error('Error calling batch stop API:', error);
         }
-      });
+      }
+
       setCategoryExecutionsMerged((current) =>
         current.map((exec) => {
-          if (exec.status === 'PENDING' || exec.status === 'STARTING' || exec.status === 'RUNNING') {
-            return { ...exec, status: 'ABORTED' };
-          }
-          return exec;
+          if (!isCategoryExecutionAbortable(exec)) return exec;
+          return mergeCategoryExecutionRow(exec, {
+            keyword: exec.keyword,
+            status: 'ABORTED',
+            pipeline_summary: buildAbortedFailureSummary(exec.keyword),
+            pipeline_status: 'FAILED',
+          });
         })
       );
-      setPipelineStatus('FAILED');
-      setStatusMessage('ABORTED');
+      setPipelineStatus('COMPLETED');
+      setStatusMessage('ABORTED — select a completed keyword below to view its stage data');
       setIsLoading(false);
       setIsBatching(false);
       setIsPreliminary(false);
+      setNextBatchProcessing(false);
       return;
     }
 
@@ -1951,6 +2025,7 @@ const Dashboard = () => {
     setIsLoading(false);
     setIsBatching(false);
     setIsPreliminary(false);
+    setNextBatchProcessing(false);
   };
 
   // ── handleNextBatch ──────────────────────────────────────────────────────
@@ -1999,7 +2074,6 @@ const Dashboard = () => {
     (async () => {
       const sleep = (ms: number) => new Promise((res) => setTimeout(res, ms));
       const TRIGGER_INTERVAL_MS = 5000;
-      const MAX_CONCURRENT = 5;
       let lastTriggerTime = 0;
 
       const updateCategoryExecByKeyword = (keyword: string, patch: Partial<CategoryExecution>) => {
@@ -2037,11 +2111,25 @@ const Dashboard = () => {
               run_id: triggerData.executionName || String(arn).split(':').pop() || '',
             });
           } else {
-            updateCategoryExecByKeyword(kw, { status: 'FAILED', pipeline_summary: null, pipeline_status: null });
+            const reason =
+              triggerData.error ||
+              triggerData.message ||
+              (typeof triggerData.details === 'string' ? triggerData.details : null) ||
+              `HTTP ${triggerRes.status}`;
+            updateCategoryExecByKeyword(kw, {
+              status: 'FAILED',
+              pipeline_summary: buildTriggerFailureSummary(String(reason)),
+              pipeline_status: 'FAILED',
+            });
           }
         } catch (e) {
           console.error(`Failed to trigger next-batch child for ${kw}:`, e);
-          updateCategoryExecByKeyword(kw, { status: 'FAILED', pipeline_summary: null, pipeline_status: null });
+          const reason = e instanceof Error ? e.message : 'Network error while starting pipeline';
+          updateCategoryExecByKeyword(kw, {
+            status: 'FAILED',
+            pipeline_summary: buildTriggerFailureSummary(reason),
+            pipeline_status: 'FAILED',
+          });
         }
         lastTriggerTime = Date.now();
       };
@@ -2052,7 +2140,7 @@ const Dashboard = () => {
         const runningCount = countInFlightCategoryExecutions(categoryExecutionsRef.current);
         const now = Date.now();
         const elapsedSinceTrigger = now - lastTriggerTime;
-        const slotAvailable = runningCount < MAX_CONCURRENT;
+        const slotAvailable = runningCount < MAX_CATEGORY_CONCURRENT_EXECUTIONS;
         const intervalElapsed = lastTriggerTime === 0 || elapsedSinceTrigger >= TRIGGER_INTERVAL_MS;
 
         if (slotAvailable && intervalElapsed) {
@@ -2063,7 +2151,7 @@ const Dashboard = () => {
         }
 
         if (!slotAvailable) {
-          setStatusMessage(`BATCH FULL (${runningCount}/${MAX_CONCURRENT}). Waiting for a variant to finish...`);
+          setStatusMessage(`BATCH FULL (${runningCount}/${MAX_CATEGORY_CONCURRENT_EXECUTIONS}). Waiting for a variant to finish...`);
         } else {
           const waitSec = Math.max(1, Math.ceil((TRIGGER_INTERVAL_MS - elapsedSinceTrigger) / 1000));
           setStatusMessage(`WAITING ${waitSec}s before next trigger...`);
@@ -2373,7 +2461,6 @@ const Dashboard = () => {
           (async () => {
             const sleep = (ms: number) => new Promise((res) => setTimeout(res, ms));
             const TRIGGER_INTERVAL_MS = 5000;
-            const MAX_CONCURRENT = 5;
             let lastTriggerTime = 0;
 
             const updateCategoryExecByKeyword = (
@@ -2421,24 +2508,30 @@ const Dashboard = () => {
                       '',
                   });
                 } else {
+                  const reason =
+                    triggerData.error ||
+                    triggerData.message ||
+                    (typeof triggerData.details === 'string' ? triggerData.details : null) ||
+                    `HTTP ${triggerRes.status}`;
                   updateCategoryExecByKeyword(kw, {
                     status: 'FAILED',
-                    pipeline_summary: null,
-                    pipeline_status: null,
+                    pipeline_summary: buildTriggerFailureSummary(String(reason)),
+                    pipeline_status: 'FAILED',
                   });
                 }
               } catch (e) {
                 console.error(`Failed to trigger category child for ${kw}:`, e);
+                const reason = e instanceof Error ? e.message : 'Network error while starting pipeline';
                 updateCategoryExecByKeyword(kw, {
                   status: 'FAILED',
-                  pipeline_summary: null,
-                  pipeline_status: null,
+                  pipeline_summary: buildTriggerFailureSummary(reason),
+                  pipeline_status: 'FAILED',
                 });
               }
               lastTriggerTime = Date.now();
             };
 
-            // Queue: trigger one variant at a time (5s apart), max 5 AWS RUNNING at once
+            // Queue: trigger one variant at a time (5s apart), max N AWS RUNNING at once
             const pendingQueue = [...generatedKeywords];
 
             while (pendingQueue.length > 0 && !cancelTokenRef.current) {
@@ -2447,7 +2540,7 @@ const Dashboard = () => {
               const runningCount = countInFlightCategoryExecutions(categoryExecutionsRef.current);
               const now = Date.now();
               const elapsedSinceTrigger = now - lastTriggerTime;
-              const slotAvailable = runningCount < MAX_CONCURRENT;
+              const slotAvailable = runningCount < MAX_CATEGORY_CONCURRENT_EXECUTIONS;
               const intervalElapsed =
                 lastTriggerTime === 0 || elapsedSinceTrigger >= TRIGGER_INTERVAL_MS;
 
@@ -2460,7 +2553,7 @@ const Dashboard = () => {
 
               if (!slotAvailable) {
                 setStatusMessage(
-                  `BATCH FULL (${runningCount}/${MAX_CONCURRENT}). Waiting for a variant to finish...`
+                  `BATCH FULL (${runningCount}/${MAX_CATEGORY_CONCURRENT_EXECUTIONS}). Waiting for a variant to finish...`
                 );
               } else {
                 const waitSec = Math.max(
@@ -2655,8 +2748,11 @@ const Dashboard = () => {
       const exec = categoryExecutions.find((e) => (e.keyword ?? '').trim() === newValue.trim());
       const cached = exec?.pipeline_summary ?? null;
       setPipelineSummary(cached);
-      const hasCachedStatus = !!(cached?.pipeline_status || exec?.pipeline_status);
-      setIsVariantFetching(!hasCachedStatus);
+      const needsFreshStatus =
+        !exec ||
+        hasStaleCategoryExecutionStatus(exec) ||
+        !hasPipelineStageData(cached);
+      setIsVariantFetching(needsFreshStatus);
       setIsVariantStagesLoading(true);
       setStatusMessage('');
     }
@@ -2683,19 +2779,18 @@ const Dashboard = () => {
 
   // In category mode, fetch status + S3 stage data for the selected variant only
   useEffect(() => {
-    if (searchingMode !== 'CATEGORY BASED' || (pipelineStatus !== 'COMPLETED' && pipelineStatus !== 'POLLING')) {
+    if (searchingMode !== 'CATEGORY BASED' || !canBrowseCategoryVariantDetails(pipelineStatus)) {
       return;
     }
 
     const selected = selectedVariantKey;
-    if (!selected || !variantExecutionArn) return;
+    if (!selected) return;
 
     const fetchId = ++variantFetchIdRef.current;
     const controller = new AbortController();
 
     const exec = categoryExecutionsRef.current.find((e) => (e.keyword ?? '').trim() === selected);
-    const cachedSummary = exec?.pipeline_summary ?? null;
-    const hasCachedStatus = !!(cachedSummary?.pipeline_status || exec?.pipeline_status);
+    const arn = exec?.execution_arn?.trim() || null;
 
     setStageDataVariant(null);
     setKeywordPlannerResults(null);
@@ -2711,9 +2806,32 @@ const Dashboard = () => {
     setHasLoadedAmazon(false);
     setHasLoadedAlibaba(false);
 
-    if (hasCachedStatus) {
+    const finishWithoutStageFetch = () => {
       setIsVariantFetching(false);
-      if (cachedSummary) setPipelineSummary(cachedSummary);
+      setIsVariantStagesLoading(false);
+      setStageDataVariant(selected);
+      setHasLoadedKeywordPlanner(true);
+      setHasLoadedTrends(true);
+      setHasLoadedAmazon(true);
+      setHasLoadedAlibaba(true);
+    };
+
+    if (!arn || isCategoryVariantUnprocessed(exec)) {
+      finishWithoutStageFetch();
+      return () => {
+        controller.abort();
+      };
+    }
+
+    const cachedSummary = exec?.pipeline_summary ?? null;
+    const needsFreshStatus =
+      !exec ||
+      hasStaleCategoryExecutionStatus(exec) ||
+      !hasPipelineStageData(cachedSummary);
+
+    if (!needsFreshStatus && cachedSummary) {
+      setIsVariantFetching(false);
+      setPipelineSummary(cachedSummary);
     } else {
       setIsVariantFetching(true);
     }
@@ -2722,10 +2840,17 @@ const Dashboard = () => {
     const isCurrentFetch = () =>
       variantFetchIdRef.current === fetchId && selectedVariantKey === selected;
 
+    const markAllStagesLoaded = () => {
+      setHasLoadedKeywordPlanner(true);
+      setHasLoadedTrends(true);
+      setHasLoadedAmazon(true);
+      setHasLoadedAlibaba(true);
+    };
+
     const fetchStagesForVariant = async (signal: AbortSignal) => {
       try {
         const statusRes = await fetch(
-          `/api/pipeline/status?arn=${encodeURIComponent(variantExecutionArn)}`,
+          `/api/pipeline/status?arn=${encodeURIComponent(arn)}`,
           { signal }
         );
         if (signal.aborted || !isCurrentFetch()) return;
@@ -2735,18 +2860,23 @@ const Dashboard = () => {
           if (!isCurrentFetch()) return;
 
           const summary = normalizePipelineSummary(statusData.pipeline_summary);
+          const mergedExec = categoryExecutionFromStatusApi(exec ?? {
+            keyword: selected,
+            run_id: '',
+            execution_arn: arn,
+          }, statusData);
           if (summary) {
             setPipelineSummary(summary);
             setCategoryExecutionsMerged((prev) =>
               prev.map((e) =>
-                (e.keyword ?? '').trim() === selected
-                  ? mergeCategoryExecutionRow(e, {
-                    keyword: e.keyword,
-                    status: statusData.status || e.status,
-                    pipeline_summary: summary,
-                    pipeline_status: summary.pipeline_status,
-                  })
-                  : e
+                (e.keyword ?? '').trim() === selected ? mergedExec : e
+              )
+            );
+          } else if (mergedExec.pipeline_summary) {
+            setPipelineSummary(mergedExec.pipeline_summary);
+            setCategoryExecutionsMerged((prev) =>
+              prev.map((e) =>
+                (e.keyword ?? '').trim() === selected ? mergedExec : e
               )
             );
           }
@@ -2755,11 +2885,16 @@ const Dashboard = () => {
           setIsVariantFetching(false);
         }
 
+        if (exec?.status === 'ABORTED') {
+          if (isCurrentFetch()) finishWithoutStageFetch();
+          return;
+        }
+
         const [kwpRes, trendsRes, amzRes, aliRes] = await Promise.all([
-          fetch(`/api/pipeline/keyword-planner?arn=${encodeURIComponent(variantExecutionArn)}`, { signal }),
-          fetch(`/api/pipeline/google-trends?arn=${encodeURIComponent(variantExecutionArn)}`, { signal }),
-          amazonFilters ? fetch(`/api/pipeline/amazon?arn=${encodeURIComponent(variantExecutionArn)}`, { signal }) : Promise.resolve(null),
-          alibabaFilters ? fetch(`/api/pipeline/alibaba?arn=${encodeURIComponent(variantExecutionArn)}`, { signal }) : Promise.resolve(null),
+          fetch(`/api/pipeline/keyword-planner?arn=${encodeURIComponent(arn)}`, { signal }),
+          fetch(`/api/pipeline/google-trends?arn=${encodeURIComponent(arn)}`, { signal }),
+          amazonFilters ? fetch(`/api/pipeline/amazon?arn=${encodeURIComponent(arn)}`, { signal }) : Promise.resolve(null),
+          alibabaFilters ? fetch(`/api/pipeline/alibaba?arn=${encodeURIComponent(arn)}`, { signal }) : Promise.resolve(null),
         ]);
 
         if (signal.aborted || !isCurrentFetch()) return;
@@ -2771,7 +2906,6 @@ const Dashboard = () => {
               setKeywordPlannerResults(kwpData.results);
             }
             if (kwpData.meta !== undefined) setKeywordPlannerMeta(kwpData.meta || null);
-            setHasLoadedKeywordPlanner(true);
           }
         }
         if (trendsRes?.ok) {
@@ -2781,7 +2915,6 @@ const Dashboard = () => {
               setTrendsResults(trendsData.results);
             }
             if (trendsData.meta !== undefined) setTrendsMeta(trendsData.meta || null);
-            setHasLoadedTrends(true);
           }
         }
         if (amzRes?.ok) {
@@ -2791,7 +2924,6 @@ const Dashboard = () => {
               setAmazonResults(amzData.results);
             }
             if (amzData.meta !== undefined) setAmazonMeta(amzData.meta || null);
-            setHasLoadedAmazon(true);
           }
         }
         if (aliRes?.ok) {
@@ -2801,11 +2933,11 @@ const Dashboard = () => {
               setAlibabaResults(aliData.results);
             }
             if (aliData.meta !== undefined) setAlibabaMeta(aliData.meta || null);
-            setHasLoadedAlibaba(true);
           }
         }
 
         if (isCurrentFetch()) {
+          markAllStagesLoaded();
           setStageDataVariant(selected);
           setIsVariantStagesLoading(false);
         }
@@ -2816,8 +2948,10 @@ const Dashboard = () => {
           console.error('Error fetching variant stage data:', err);
         }
         if (isCurrentFetch()) {
+          markAllStagesLoaded();
           setIsVariantFetching(false);
           setIsVariantStagesLoading(false);
+          setStageDataVariant(selected);
         }
       }
     };
@@ -2834,6 +2968,7 @@ const Dashboard = () => {
     variantExecutionArn,
     amazonFilters,
     alibabaFilters,
+    setCategoryExecutionsMerged,
   ]);
 
   // Backfill business summaries for category rows that reached AWS terminal before output was parsed
@@ -4372,21 +4507,10 @@ const Dashboard = () => {
                               alibabaFilters,
                             });
                             const badge = getPipelineStatusBadgeClasses(pipelineHealth);
-                            const message = exec.pipeline_summary
-                              ? getPipelineUserMessage({
-                                pipelineStatus: exec.pipeline_summary.pipeline_status,
-                                stages: exec.pipeline_summary.stages,
-                                amazonFilters,
-                                alibabaFilters,
-                                displayStatus: pipelineHealth,
-                              })
-                              : pipelineHealth === 'RUNNING' && isTerminalAwsStatus(exec.status)
-                                ? 'Finalizing pipeline results...'
-                                : pipelineHealth === 'RUNNING'
-                                  ? 'Pipeline in progress...'
-                                  : pipelineHealth === 'PENDING'
-                                    ? 'Waiting to start...'
-                                    : '—';
+                            const message = getCategoryExecutionUserMessage(exec, {
+                              amazonFilters,
+                              alibabaFilters,
+                            });
 
                             return (
                               <tr key={idx} className="border-b border-white/10 hover:bg-white/5 transition-colors">
@@ -4423,6 +4547,32 @@ const Dashboard = () => {
                     </p>
                   </div>
                 )}
+                {searchingMode === 'CATEGORY BASED' &&
+                  selectedVariantKey &&
+                  isCategoryVariantUnprocessed(selectedCategoryExec) && (
+                    <div className="mb-6 p-4 bg-[#2a3627] rounded border border-orange-400/40 text-center">
+                      <p className="text-sm text-gray-100 font-semibold">
+                        This keyword was aborted before processing started.
+                      </p>
+                      <p className="mt-2 text-xs text-gray-400">
+                        No stage data was written for this variant. Select a{' '}
+                        <strong className="text-[#C0FE72]">SUCCEEDED</strong> keyword from the tracker to view results.
+                      </p>
+                    </div>
+                  )}
+                {searchingMode === 'CATEGORY BASED' &&
+                  selectedVariantKey &&
+                  selectedCategoryExec?.status === 'ABORTED' &&
+                  selectedCategoryExec.execution_arn && (
+                    <div className="mb-6 p-4 bg-[#2a3627] rounded border border-orange-400/40 text-center">
+                      <p className="text-sm text-gray-100 font-semibold">
+                        This keyword was aborted while the pipeline was running.
+                      </p>
+                      <p className="mt-2 text-xs text-gray-400">
+                        Stage data is unavailable or incomplete because the execution was stopped before completion.
+                      </p>
+                    </div>
+                  )}
                 {/* Category mode: selected variant produced no surviving stage data (all variants filtered out).
                         Only show after Keyword Planner + Trends stages have both completed and returned no rows. */}
                 {searchingMode === 'CATEGORY BASED' &&

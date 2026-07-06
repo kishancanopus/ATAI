@@ -49,6 +49,7 @@ def start_actor(keyword, max_items):
     url = (
         f"{APIFY_BASE_URL}/acts/{ACTOR_ID}/runs"
         f"?token={APIFY_TOKEN}&waitForFinish=60"
+        f"&memory=128&timeout=3600&maxTotalChargeUsd=0.2"
     )
 
     payload = json.dumps({
