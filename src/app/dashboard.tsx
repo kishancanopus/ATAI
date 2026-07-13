@@ -14,6 +14,7 @@ import {
   formatPipelineStageMessage,
   getPipelineUserMessage,
   resolveStageMessage,
+  scopeMessageForSelectedVariant,
 } from '@/lib/pipelineMessages';
 import {
   MAX_CATEGORY_CONCURRENT_EXECUTIONS,
@@ -1016,6 +1017,9 @@ const Dashboard = () => {
     (variantKeyword?: string | null) => {
       const overallStatus = getOverallPipelineStatus();
       const summary = activePipelineSummary;
+      const isVariantScoped = Boolean(variantKeyword);
+      const scopeHubMessage = (message: string) =>
+        isVariantScoped ? scopeMessageForSelectedVariant(message) : message;
 
       return (
         <div className="mb-8 p-6 rounded-2xl bg-white/[0.02] border border-white/10 backdrop-blur-md shadow-2xl relative overflow-hidden">
@@ -1048,10 +1052,15 @@ const Dashboard = () => {
                     — {variantKeyword}
                   </span>
                 )}
+                {isVariantScoped && (
+                  <span className="inline-flex items-center px-2 py-0.5 rounded-md text-[10px] font-bold uppercase tracking-wide border border-[#C0FE72]/30 bg-[#C0FE72]/10 text-[#C0FE72] normal-case">
+                    Selected variant only
+                  </span>
+                )}
               </h3>
-              <p className="text-xs text-gray-400 mt-1">
+              <p className="text-xs text-gray-400 mt-1 max-w-2xl">
                 {variantKeyword
-                  ? `Stage-level status and metrics for the selected variant keyword.`
+                  ? 'Status below applies to this variant only. Consolidated Results merges data across all processed variants.'
                   : 'Real-time pipeline orchestration health, stage-level statuses, and data collection metrics'}
               </p>
             </div>
@@ -1130,7 +1139,7 @@ const Dashboard = () => {
                 className={`p-4 border rounded-xl mb-6 flex flex-col sm:flex-row sm:items-center justify-between gap-3 ${bannerBg} transition-all relative z-10`}
               >
                 <span className={`text-sm font-semibold tracking-wide break-words whitespace-normal leading-relaxed ${textClass}`}>
-                  {statusMessageText}
+                  {scopeHubMessage(statusMessageText)}
                 </span>
                 {summary?.generated_at && (
                   <span className="text-xs text-gray-500 whitespace-nowrap">
@@ -1150,7 +1159,7 @@ const Dashboard = () => {
             {renderStageCard(
               'Keyword Planner',
               getStageStatusAndMeta('keyword_planner').status,
-              getStageStatusAndMeta('keyword_planner').message,
+              scopeHubMessage(getStageStatusAndMeta('keyword_planner').message),
               getStageStatusAndMeta('keyword_planner').rows,
               <svg className="w-5 h-5" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24">
                 <path strokeLinecap="round" strokeLinejoin="round" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" />
@@ -1159,7 +1168,7 @@ const Dashboard = () => {
             {renderStageCard(
               'Google Trends',
               getStageStatusAndMeta('google_trends').status,
-              getStageStatusAndMeta('google_trends').message,
+              scopeHubMessage(getStageStatusAndMeta('google_trends').message),
               getStageStatusAndMeta('google_trends').rows,
               <svg className="w-5 h-5" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24">
                 <path strokeLinecap="round" strokeLinejoin="round" d="M13 7h8m0 0v8m0-8l-8 8-4-4-6 6" />
@@ -1168,7 +1177,7 @@ const Dashboard = () => {
             {renderStageCard(
               'Amazon',
               getStageStatusAndMeta('amazon').status,
-              getStageStatusAndMeta('amazon').message,
+              scopeHubMessage(getStageStatusAndMeta('amazon').message),
               getStageStatusAndMeta('amazon').rows,
               <svg className="w-5 h-5" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24">
                 <path strokeLinecap="round" strokeLinejoin="round" d="M16 11V7a4 4 0 00-8 0v4M5 9h14l1 12H4L5 9z" />
@@ -1177,7 +1186,7 @@ const Dashboard = () => {
             {renderStageCard(
               'Alibaba Sourcing',
               getStageStatusAndMeta('alibaba').status,
-              getStageStatusAndMeta('alibaba').message,
+              scopeHubMessage(getStageStatusAndMeta('alibaba').message),
               getStageStatusAndMeta('alibaba').rows,
               <svg className="w-5 h-5" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24">
                 <path
@@ -1553,16 +1562,20 @@ const Dashboard = () => {
 
     const amzMatchBySeed = new Map<string, any | null>();
     const amzMatchTypeBySeed = new Map<string, string>();
+    const amzReasonBySeed = new Map<string, string>();
     const batchSeeds = seedRows.map((row) => ({
       key: seedKey(row),
       keyword: (row.keyword ?? row.sub_keyword ?? row.root_keyword ?? '').toString(),
       rootKeyword: (row.root_keyword ?? row.keyword ?? '').toString(),
       searchVolume: Number(row.avg_monthly_searches ?? 0),
     }));
-    const batchMatches = matchAmazonForKwpSeedsBatch(batchSeeds, amzRows, amzByExecKw);
-    for (const [key, result] of batchMatches) {
-      amzMatchBySeed.set(key, result?.row ?? null);
-      amzMatchTypeBySeed.set(key, result?.matchType ?? 'none');
+    const batchMatches = matchAmazonForKwpSeedsBatch(batchSeeds, amzRows, amzByExecKw, {
+      amazonEnabled: amazonFilters,
+    });
+    for (const [key, outcome] of batchMatches) {
+      amzMatchBySeed.set(key, outcome.match?.row ?? null);
+      amzMatchTypeBySeed.set(key, outcome.match?.matchType ?? 'none');
+      amzReasonBySeed.set(key, outcome.diagnosticReason);
     }
 
     // ── Fuzzy join helper ─────────────────────────────────────────────────
@@ -1631,7 +1644,7 @@ const Dashboard = () => {
 
     // Collect all numeric values for normalisation
     const allSearchVol: number[] = [];
-    const allTrendAvg: number[] = [];
+    const allTrendMetric: number[] = [];
     const allReviews: number[] = [];
     const allPrices: number[] = [];
     const allMoq: number[] = [];
@@ -1647,21 +1660,31 @@ const Dashboard = () => {
       const trendMatch = matchTrendForKwpKeyword(kw, scopedTrends);
       const amzMatch = amzMatchBySeed.get(seedKey(row)) ?? null;
       const amzMatchType = amzMatchTypeBySeed.get(seedKey(row)) ?? 'none';
-      const aliMatch = matchAlibabaForKwpKeyword(
-        kw,
-        scopedAli,
-        amzMatch?.title ? String(amzMatch.title) : undefined
-      );
+      const matchedAmazonTitle = amzMatch?.title ? String(amzMatch.title) : undefined;
+      const aliOutcome = matchAlibabaForKwpKeyword(kw, scopedAli, {
+        amazonTitle: matchedAmazonTitle,
+        useAmazonTitleFirst: amazonFilters && !!matchedAmazonTitle,
+        alibabaEnabled: alibabaFilters,
+      });
+      const aliMatch = aliOutcome.row;
+      const alibabaMatchReason = aliOutcome.diagnosticReason;
 
       const sv = Number(kwpMatch?.avg_monthly_searches ?? row.avg_monthly_searches ?? 0);
-      const ta = Number(trendMatch?.gt_interest_avg ?? trendMatch?.interest_avg ?? 0);
+      const trendMetric = trendMatch != null
+        ? Number(
+          trendMatch.gt_sustainability ??
+          trendMatch.gt_interest_avg ??
+          trendMatch.interest_avg ??
+          0
+        )
+        : 0;
       const reviews = Number(amzMatch?.reviews_count ?? 0);
       const price = Number(amzMatch?.amazon_price_usd ?? amzMatch?.base_price_usd ?? 0);
       const moq = Number(aliMatch?.moq ?? 0);
       const rating = Number(amzMatch?.rating ?? aliMatch?.supplier_rating ?? 0);
 
       if (sv > 0) allSearchVol.push(sv);
-      if (ta > 0) allTrendAvg.push(ta);
+      if (trendMatch != null && Number.isFinite(trendMetric)) allTrendMetric.push(trendMetric);
       if (reviews > 0) allReviews.push(reviews);
       if (price > 0) allPrices.push(price);
       if (moq > 0) allMoq.push(moq);
@@ -1670,7 +1693,7 @@ const Dashboard = () => {
 
     const maxOrOne = (arr: number[]) => arr.length > 0 ? Math.max(...arr) : 1;
     const maxSV = maxOrOne(allSearchVol);
-    const maxTA = maxOrOne(allTrendAvg);
+    const maxTM = maxOrOne(allTrendMetric);
     const maxReviews = maxOrOne(allReviews);
     const maxPrice = maxOrOne(allPrices);
     const maxMoq = maxOrOne(allMoq);
@@ -1686,11 +1709,15 @@ const Dashboard = () => {
       const trendMatch = matchTrendForKwpKeyword(kw, scopedTrends);
       const amzMatch = amzMatchBySeed.get(seedKey(row)) ?? null;
       const amzMatchType = amzMatchTypeBySeed.get(seedKey(row)) ?? 'none';
-      const aliMatch = matchAlibabaForKwpKeyword(
-        kw,
-        scopedAli,
-        amzMatch?.title ? String(amzMatch.title) : undefined
-      );
+      const amazonMatchReason = amzReasonBySeed.get(seedKey(row)) ?? '—';
+      const matchedAmazonTitle = amzMatch?.title ? String(amzMatch.title) : undefined;
+      const aliOutcome = matchAlibabaForKwpKeyword(kw, scopedAli, {
+        amazonTitle: matchedAmazonTitle,
+        useAmazonTitleFirst: amazonFilters && !!matchedAmazonTitle,
+        alibabaEnabled: alibabaFilters,
+      });
+      const aliMatch = aliOutcome.row;
+      const alibabaMatchReason = aliOutcome.diagnosticReason;
 
       // ── KWP fields (from KWP seed row itself or kwpMatch)
       const avgMonthlySearches = Number(kwpMatch?.avg_monthly_searches ?? row.avg_monthly_searches ?? 0);
@@ -1706,6 +1733,11 @@ const Dashboard = () => {
       const trendAvg = hasTrendMatch
         ? Number(trendMatch?.gt_interest_avg ?? trendMatch?.interest_avg ?? 0)
         : null;
+      const trendSustainability =
+        hasTrendMatch && trendMatch?.gt_sustainability != null
+          ? Number(trendMatch.gt_sustainability)
+          : null;
+      const trendMetricForScore = trendSustainability ?? trendAvg ?? 0;
       const gtInterestTrend = trendMatch?.gt_interest_trend ?? '-';
       const gtInterestChangePct =
         trendMatch && trendMatch.gt_interest_change_pct != null
@@ -1730,7 +1762,7 @@ const Dashboard = () => {
 
       // ── Scores (0–100)
       const demandScore = maxSV > 0 ? Math.round((avgMonthlySearches / maxSV) * 100) : 0;
-      const trendScore = maxTA > 0 ? Math.round(((trendAvg ?? 0) / maxTA) * 100) : 0;
+      const trendScore = maxTM > 0 ? Math.round((trendMetricForScore / maxTM) * 100) : 0;
       // Lower Amazon reviews = less competition (easier market entry)
       const competitionScore = maxReviews > 0 ? Math.round((1 - Math.min(reviews / maxReviews, 1)) * 100) : 100;
       const priceScore = maxPrice > 0 && amazonPrice > 0 ? Math.round(Math.min((amazonPrice / maxPrice) * 100, 100)) : 0;
@@ -1759,12 +1791,15 @@ const Dashboard = () => {
         // Google Trends
         trend_peak: trendPeak,
         trend_avg: trendAvg !== null ? Number(trendAvg.toFixed(1)) : null,
+        trend_sustainability:
+          trendSustainability !== null ? Number(trendSustainability.toFixed(1)) : null,
         gt_interest_trend: gtInterestTrend,
         gt_interest_change_pct: gtInterestChangePct,
         // Amazon
         amazon_title: amazonTitle,
         amazon_match_type: amzMatchType,
         amazon_match_label: formatAmazonMatchType(amzMatchType as any),
+        amazon_match_reason: amazonMatchReason,
         asin,
         amazon_price_usd: amazonPrice || null,
         reviews_count: reviews || null,
@@ -1781,6 +1816,7 @@ const Dashboard = () => {
         alibaba_product_id: aliMatch?.product_id || null,
         product_link: aliMatch?.product_link || null,
         verified_supplier: aliMatch?.verified_supplier === true || aliMatch?.verified_supplier === 'true',
+        alibaba_match_reason: alibabaMatchReason,
         // Scores
         demand_score: demandScore,
         trend_score: trendScore,
@@ -1799,7 +1835,7 @@ const Dashboard = () => {
 
     setConsolidatedResults(ranked);
     setIsTableRefreshing(false);
-  }, [amazonResults, alibabaResults, keywordPlannerResults, trendsResults, googleTrendScore, fcl]);
+  }, [amazonResults, alibabaResults, keywordPlannerResults, trendsResults, googleTrendScore, fcl, amazonFilters, alibabaFilters]);
 
   // Apply UI filters to the consolidated list dynamically.
   // Consolidated table uses displayedConsolidatedResults (GT threshold applied at build + render).
@@ -3547,6 +3583,9 @@ const Dashboard = () => {
             {/* Google Trend Score — label above, slider widget below */}
             <div className="flex flex-col gap-2">
               <span className="text-xs font-bold tracking-widest text-gray-400 uppercase">GOOGLE TREND SCORE</span>
+              <p className="text-[10px] text-gray-500 leading-tight max-w-xs">
+                Min GT Sustainability (weeks ≥ 30 interest). Set 0 to disable.
+              </p>
               <div className="flex items-center gap-2 bg-black/25 border border-white/10 rounded-lg px-3 py-2">
                 <svg width="18" height="11" viewBox="0 0 20 12" className="opacity-80 shrink-0">
                   <path d="M2 10 L6 6 L10 8 L18 2" stroke="#4285f4" strokeWidth="2" fill="none" strokeLinecap="round" strokeLinejoin="round" />
@@ -4097,8 +4136,11 @@ const Dashboard = () => {
                     <h2 className="text-2xl font-bold text-[#C0FE72] tracking-wider">CONSOLIDATED RESULTS</h2>
                     <p className="text-xs text-gray-400 mt-1">
                       Merged from all pipeline stages · Scored &amp; ranked in-browser
+                      {searchingMode === 'CATEGORY BASED' && (
+                        <> · <strong className="text-gray-300">All processed variants</strong> (not just the selected one in Variant View)</>
+                      )}
                       {googleTrendScore > 0 && (
-                        <> · Only keywords with <strong className="text-gray-300">GT Avg ≥ {googleTrendScore}</strong></>
+                        <> · Only keywords with <strong className="text-gray-300">GT Sustainability ≥ {googleTrendScore}</strong></>
                       )}
                     </p>
                   </div>
@@ -4146,7 +4188,7 @@ const Dashboard = () => {
                 {/* Score legend */}
                 <div className="flex flex-wrap gap-4 mb-4 text-xs text-gray-400">
                   <span><strong className="text-[#C0FE72]">Demand</strong> 35% · Avg monthly searches (KWP)</span>
-                  <span><strong className="text-[#C0FE72]">Trend</strong> 30% · Google Trends peak interest</span>
+                  <span><strong className="text-[#C0FE72]">Trend</strong> 30% · GT Sustainability (sustained weekly interest)</span>
                   <span><strong className="text-[#C0FE72]">Competition</strong> 15% · Inverse of Amazon review count</span>
                   <span><strong className="text-[#C0FE72]">Supplier</strong> 10% · Alibaba rating + low MOQ</span>
                   <span><strong className="text-[#C0FE72]">Price</strong> 10% · Amazon price relative to others</span>
@@ -4166,9 +4208,9 @@ const Dashboard = () => {
                       <tr className="bg-[#1a2418] text-[#C0FE72] text-[10px] uppercase tracking-widest relative">
                         <th className="px-3 py-1 text-center border-r border-white/10">#</th>
                         <th colSpan={4} className="px-3 py-1 text-center border-r border-white/10">📋 Keyword Planner</th>
-                        <th colSpan={4} className="px-3 py-1 text-center border-r border-white/10">📈 Google Trends</th>
-                        <th colSpan={7} className="px-3 py-1 text-center border-r border-white/10">🛒 Amazon</th>
-                        <th colSpan={4} className="px-3 py-1 text-center border-r border-white/10">🏭 Alibaba</th>
+                        <th colSpan={5} className="px-3 py-1 text-center border-r border-white/10">📈 Google Trends</th>
+                        <th colSpan={8} className="px-3 py-1 text-center border-r border-white/10">🛒 Amazon</th>
+                        <th colSpan={5} className="px-3 py-1 text-center border-r border-white/10">🏭 Alibaba</th>
                         <th colSpan={6} className="px-3 py-1 text-center">🏆 Scores</th>
                       </tr>
                       {/* Column names */}
@@ -4180,10 +4222,12 @@ const Dashboard = () => {
                         <th className="px-3 py-2 font-bold whitespace-nowrap text-xs uppercase border-r border-black/20">KWP Trend</th>
                         <th className="px-3 py-2 font-bold whitespace-nowrap text-xs uppercase">GT Peak</th>
                         <th className="px-3 py-2 font-bold whitespace-nowrap text-xs uppercase">GT Avg</th>
+                        <th className="px-3 py-2 font-bold whitespace-nowrap text-xs uppercase">GT Sustain.</th>
                         <th className="px-3 py-2 font-bold whitespace-nowrap text-xs uppercase">GT Direction</th>
                         <th className="px-3 py-2 font-bold whitespace-nowrap text-xs uppercase border-r border-black/20">GT Change %</th>
                         <th className="px-3 py-2 font-bold whitespace-nowrap text-xs uppercase">Product Title</th>
                         <th className="px-3 py-2 font-bold whitespace-nowrap text-xs uppercase">Match</th>
+                        <th className="px-3 py-2 font-bold whitespace-nowrap text-xs uppercase max-w-[180px]">Amz Reason</th>
                         <th className="px-3 py-2 font-bold whitespace-nowrap text-xs uppercase">Price (USD)</th>
                         <th className="px-3 py-2 font-bold whitespace-nowrap text-xs uppercase">Reviews</th>
                         <th className="px-3 py-2 font-bold whitespace-nowrap text-xs uppercase">Rating</th>
@@ -4192,7 +4236,8 @@ const Dashboard = () => {
                         <th className="px-3 py-2 font-bold whitespace-nowrap text-xs uppercase">Supplier Product</th>
                         <th className="px-3 py-2 font-bold whitespace-nowrap text-xs uppercase">MOQ</th>
                         <th className="px-3 py-2 font-bold whitespace-nowrap text-xs uppercase">Sup. Rating</th>
-                        <th className="px-3 py-2 font-bold whitespace-nowrap text-xs uppercase border-r border-black/20">Country</th>
+                        <th className="px-3 py-2 font-bold whitespace-nowrap text-xs uppercase">Country</th>
+                        <th className="px-3 py-2 font-bold whitespace-nowrap text-xs uppercase max-w-[180px] border-r border-black/20">Ali Reason</th>
                         <th className="px-3 py-2 font-bold whitespace-nowrap text-xs uppercase">Demand</th>
                         <th className="px-3 py-2 font-bold whitespace-nowrap text-xs uppercase">Trend</th>
                         <th className="px-3 py-2 font-bold whitespace-nowrap text-xs uppercase">Compet.</th>
@@ -4232,6 +4277,7 @@ const Dashboard = () => {
                             {/* Google Trends */}
                             <td className="px-3 py-2 text-gray-100 whitespace-nowrap">{fmtGtNum(row.trend_peak)}</td>
                             <td className="px-3 py-2 text-gray-100 whitespace-nowrap">{fmtGtNum(row.trend_avg, '', '', 1)}</td>
+                            <td className="px-3 py-2 text-gray-100 whitespace-nowrap">{fmtGtNum(row.trend_sustainability, '', '', 1)}</td>
                             <td className="px-3 py-2 text-gray-100 whitespace-nowrap capitalize">{str(row.gt_interest_trend)}</td>
                             <td className="px-3 py-2 whitespace-nowrap border-r border-white/10">
                               {row.gt_interest_change_pct !== null && row.gt_interest_change_pct !== undefined
@@ -4267,6 +4313,12 @@ const Dashboard = () => {
                                 </span>
                               ) : '-'}
                             </td>
+                            <td
+                              className={`px-3 py-2 text-[10px] leading-snug max-w-[200px] ${row.amazon_title === '-' || !row.amazon_title ? 'text-orange-300/90' : 'text-gray-400'}`}
+                              title={str(row.amazon_match_reason)}
+                            >
+                              <span className="line-clamp-3 break-words">{str(row.amazon_match_reason)}</span>
+                            </td>
                             <td className="px-3 py-2 text-gray-100 whitespace-nowrap">{fmtNum(row.amazon_price_usd, '$', '', 2)}</td>
                             <td className="px-3 py-2 text-gray-100 whitespace-nowrap">{row.reviews_count ? Number(row.reviews_count).toLocaleString() : '-'}</td>
                             <td className="px-3 py-2 text-gray-100 whitespace-nowrap">{fmtNum(row.rating, '', '★', 1)}</td>
@@ -4290,7 +4342,13 @@ const Dashboard = () => {
                             </td>
                             <td className="px-3 py-2 text-gray-100 whitespace-nowrap">{row.moq ? Number(row.moq).toLocaleString() : '-'}</td>
                             <td className="px-3 py-2 text-gray-100 whitespace-nowrap">{fmtNum(row.supplier_rating, '', '★', 1)}</td>
-                            <td className="px-3 py-2 text-gray-100 whitespace-nowrap border-r border-white/10">{str(row.supplier_country)}</td>
+                            <td className="px-3 py-2 text-gray-100 whitespace-nowrap">{str(row.supplier_country)}</td>
+                            <td
+                              className={`px-3 py-2 text-[10px] leading-snug max-w-[200px] border-r border-white/10 ${row.alibaba_title === '-' || !row.alibaba_title ? 'text-orange-300/90' : 'text-gray-400'}`}
+                              title={str(row.alibaba_match_reason)}
+                            >
+                              <span className="line-clamp-3 break-words">{str(row.alibaba_match_reason)}</span>
+                            </td>
                             {/* Scores */}
                             <td className={`px-3 py-2 font-bold text-center whitespace-nowrap ${scoreColor(row.demand_score)}`}>{row.demand_score}</td>
                             <td className={`px-3 py-2 font-bold text-center whitespace-nowrap ${scoreColor(row.trend_score)}`}>{row.trend_score}</td>
@@ -4415,10 +4473,10 @@ const Dashboard = () => {
                 <div className="mt-6 mb-10 p-6 bg-[#2a3627] rounded border border-orange-400/40 text-center">
                   <div className="text-4xl mb-3">📈</div>
                   <p className="text-lg font-bold text-orange-300 mb-2">
-                    No keywords met Google Trend score ≥ {googleTrendScore}
+                    No keywords met GT Sustainability ≥ {googleTrendScore}
                   </p>
                   <p className="text-sm text-gray-400 max-w-lg mx-auto">
-                    Keyword Planner returned results, but none had a GT Avg at or above your threshold. Lower the{' '}
+                    Keyword Planner returned results, but none had enough weeks above interest 30. Lower the{' '}
                     <strong className="text-white">Google Trend Score</strong> slider (or set it to 0 to show all) and search again.
                   </p>
                 </div>

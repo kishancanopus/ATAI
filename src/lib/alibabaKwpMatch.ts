@@ -1,9 +1,31 @@
 /**
  * Keyword Planner → Alibaba product matching (consolidated table).
- * Scoped to the same root execution pool; exact keyword first, then title overlap.
+ * Scoped to the same root execution pool.
+ *
+ * When Amazon is active and a product title is available:
+ *   1) Alibaba title overlap with Amazon title (40%)
+ *   2) Exact keyword match
+ *   3) Alibaba title overlap with KWP keyword (40%)
+ *
+ * When Amazon is off or has no matched product:
+ *   1) Exact keyword match
+ *   2) Alibaba title overlap with KWP keyword (40%)
  */
 
 export type AlibabaProductRow = Record<string, unknown>;
+
+export type AlibabaMatchOptions = {
+  amazonTitle?: string;
+  /** Amazon filters on and a matched Amazon product exists */
+  useAmazonTitleFirst?: boolean;
+  /** Alibaba marketplace stage enabled in search filters */
+  alibabaEnabled?: boolean;
+};
+
+export type AlibabaMatchResult = {
+  row: AlibabaProductRow | null;
+  diagnosticReason: string;
+};
 
 const TITLE_MIN_RATIO = 0.4;
 
@@ -17,6 +39,39 @@ function normalizeText(value: unknown): string {
 
 function tokenize(value: string): string[] {
   return normalizeText(value).split(' ').filter((w) => w.length > 2);
+}
+
+function matchExactKeyword(
+  variantKeyword: string,
+  scopedRows: AlibabaProductRow[]
+): AlibabaProductRow | null {
+  const kwNorm = normalizeText(variantKeyword);
+  if (!kwNorm) return null;
+  return scopedRows.find((row) => normalizeText(row.keyword) === kwNorm) ?? null;
+}
+
+function matchTitleOverlap(
+  referenceText: string,
+  scopedRows: AlibabaProductRow[]
+): AlibabaProductRow | null {
+  const words = tokenize(referenceText);
+  if (words.length === 0) return null;
+
+  let best: AlibabaProductRow | null = null;
+  let bestScore = 0;
+
+  for (const row of scopedRows) {
+    const title = normalizeText(row.title ?? '');
+    if (!title) continue;
+    const hits = words.filter((w) => title.includes(w)).length;
+    const ratio = hits / words.length;
+    if (ratio >= TITLE_MIN_RATIO && hits > bestScore) {
+      bestScore = hits;
+      best = row;
+    }
+  }
+
+  return best;
 }
 
 export function groupAlibabaByRoot(
@@ -53,51 +108,51 @@ export function groupAlibabaByRoot(
 export function matchAlibabaForKwpKeyword(
   variantKeyword: string,
   scopedRows: AlibabaProductRow[] | undefined,
-  amazonTitle?: string
-): AlibabaProductRow | null {
-  if (!scopedRows?.length) return null;
+  options?: AlibabaMatchOptions | string
+): AlibabaMatchResult {
+  const opts: AlibabaMatchOptions =
+    typeof options === 'string' ? { amazonTitle: options } : (options ?? {});
+  const { amazonTitle, useAmazonTitleFirst = false, alibabaEnabled = true } = opts;
 
-  const kwNorm = normalizeText(variantKeyword);
-  if (kwNorm) {
-    const exact = scopedRows.find((row) => normalizeText(row.keyword) === kwNorm);
-    if (exact) return exact;
+  if (!alibabaEnabled) {
+    return { row: null, diagnosticReason: 'Alibaba stage disabled in filters' };
   }
 
-  const kwWords = tokenize(variantKeyword);
-  if (kwWords.length > 0) {
-    let best: AlibabaProductRow | null = null;
-    let bestScore = 0;
-    for (const row of scopedRows) {
-      const title = normalizeText(row.title ?? '');
-      if (!title) continue;
-      const hits = kwWords.filter((w) => title.includes(w)).length;
-      const ratio = hits / kwWords.length;
-      if (ratio >= TITLE_MIN_RATIO && hits > bestScore) {
-        bestScore = hits;
-        best = row;
-      }
-    }
-    if (best) return best;
+  if (!scopedRows?.length) {
+    return { row: null, diagnosticReason: 'No Alibaba products in execution pool' };
   }
 
-  if (amazonTitle) {
-    const amzWords = tokenize(amazonTitle);
-    if (amzWords.length > 0) {
-      let best: AlibabaProductRow | null = null;
-      let bestScore = 0;
-      for (const row of scopedRows) {
-        const title = normalizeText(row.title ?? '');
-        if (!title) continue;
-        const hits = amzWords.filter((w) => title.includes(w)).length;
-        const ratio = hits / amzWords.length;
-        if (ratio >= TITLE_MIN_RATIO && hits > bestScore) {
-          bestScore = hits;
-          best = row;
-        }
-      }
-      if (best) return best;
+  if (useAmazonTitleFirst && amazonTitle) {
+    const byAmazon = matchTitleOverlap(amazonTitle, scopedRows);
+    if (byAmazon) {
+      return { row: byAmazon, diagnosticReason: 'Matched via Amazon title overlap (≥40%)' };
     }
   }
 
-  return null;
+  const exact = matchExactKeyword(variantKeyword, scopedRows);
+  if (exact) {
+    return { row: exact, diagnosticReason: 'Matched via exact keyword' };
+  }
+
+  const byKeyword = matchTitleOverlap(variantKeyword, scopedRows);
+  if (byKeyword) {
+    return {
+      row: byKeyword,
+      diagnosticReason: useAmazonTitleFirst && amazonTitle
+        ? 'Matched via keyword title overlap (≥40%) after Amazon title pass'
+        : 'Matched via keyword title overlap (≥40%)',
+    };
+  }
+
+  if (useAmazonTitleFirst && amazonTitle) {
+    return {
+      row: null,
+      diagnosticReason: 'No Amazon title, exact keyword, or keyword title overlap match (≥40%)',
+    };
+  }
+
+  return {
+    row: null,
+    diagnosticReason: 'No exact keyword or keyword title overlap match (≥40%)',
+  };
 }

@@ -948,25 +948,40 @@ export function getCategoryExecutionDisplayStatus(
   return getEffectivePipelineStatus(raw, exec.pipeline_summary ?? null, filters);
 }
 
+/** Score used for GT min-threshold filtering — prefers sustainability over simple avg */
+export function getGoogleTrendFilterScore(row: {
+  trend_sustainability?: number | null;
+  trend_avg?: number | null;
+}): number | null {
+  if (row.trend_sustainability != null && Number.isFinite(Number(row.trend_sustainability))) {
+    return Number(row.trend_sustainability);
+  }
+  if (row.trend_avg != null && Number.isFinite(Number(row.trend_avg))) {
+    return Number(row.trend_avg);
+  }
+  return null;
+}
+
 /** True when a consolidated row satisfies the user-configured Google Trend Score minimum */
 export function meetsGoogleTrendScoreThreshold(
-  trendAvg: number | null | undefined,
+  trendScore: number | null | undefined,
   minScore: number
 ): boolean {
   if (minScore <= 0) return true;
-  if (trendAvg === null || trendAvg === undefined) return false;
-  const n = Number(trendAvg);
+  if (trendScore === null || trendScore === undefined) return false;
+  const n = Number(trendScore);
   if (!Number.isFinite(n)) return false;
   return n >= minScore;
 }
 
 /** Exclude consolidated rows that lack GT data or fall below the configured minimum */
-export function filterConsolidatedByGoogleTrendScore<T extends { trend_avg?: number | null }>(
-  rows: T[],
-  minScore: number
-): T[] {
+export function filterConsolidatedByGoogleTrendScore<
+  T extends { trend_sustainability?: number | null; trend_avg?: number | null },
+>(rows: T[], minScore: number): T[] {
   if (minScore <= 0) return rows;
-  return rows.filter((row) => meetsGoogleTrendScoreThreshold(row.trend_avg, minScore));
+  return rows.filter((row) =>
+    meetsGoogleTrendScoreThreshold(getGoogleTrendFilterScore(row), minScore)
+  );
 }
 
 /** Tailwind classes for pipeline status badges */

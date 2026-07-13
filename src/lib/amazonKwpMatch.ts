@@ -156,7 +156,13 @@ export const KEYWORD_SYNONYMS: Record<string, string[]> = {
 /** Confidence score thresholds */
 export const CONFIDENCE_ACCEPT_HIGH = 90;
 export const CONFIDENCE_ACCEPT_FALLBACK = 70;
-export const CONFIDENCE_MIN_ACCEPT = 70;
+export const CONFIDENCE_MIN_ACCEPT = 50;
+
+/** Format confidence for UI / logs (2 decimal places). */
+export function formatMatchConfidence(confidence: number | null | undefined): string {
+  if (confidence == null || !Number.isFinite(confidence)) return '';
+  return Number(confidence).toFixed(2);
+}
 
 // ---------------------------------------------------------------------------
 // Text utilities
@@ -492,7 +498,7 @@ export function computeMatchConfidence(
     perfComponent +
     exactTitleBonus +
     disqualifierPenalty;
-  const confidence = Math.max(0, Math.min(100, raw));
+  const confidence = Math.round(Math.max(0, Math.min(100, raw)) * 100) / 100;
 
   return {
     confidence,
@@ -527,7 +533,7 @@ export function logMatchDiagnostic(d: MatchDiagnostic): void {
   if (process.env.LOG_AMAZON_MATCH_DIAGNOSTICS === 'false') return;
 
   const accepted = d.acceptedTitle
-    ? `✅ "${d.acceptedTitle.slice(0, 60)}" (${d.acceptedMatchType}, conf=${d.confidence}${d.isFallbackQuality ? ', FALLBACK' : ''})`
+    ? `✅ "${d.acceptedTitle.slice(0, 60)}" (${d.acceptedMatchType}, conf=${formatMatchConfidence(d.confidence)}${d.isFallbackQuality ? ', FALLBACK' : ''})`
     : `❌ no match`;
 
   const rejection = d.rejectionReason ? ` | reason="${d.rejectionReason}"` : '';
@@ -898,6 +904,76 @@ function matchAmazonInternal(
 // Public batch API (two-phase, preserves existing architecture)
 // ---------------------------------------------------------------------------
 
+/** Outcome of batch Amazon matching for one KWP seed (match + human-readable reason). */
+export type AmazonSeedMatchOutcome = {
+  match: AmazonMatchResult | null;
+  diagnosticReason: string;
+};
+
+/**
+ * Explain why a keyword has or lacks an Amazon product match.
+ * Does not change matching — diagnostic only.
+ */
+export function resolveAmazonMatchDiagnosticReason(
+  seed: KwpSeedInput,
+  match: AmazonMatchResult | null,
+  allAmazonRows: AmazonProductRow[],
+  amzByRoot: Map<string, AmazonProductRow[]>,
+  usedAsins: Set<string>,
+  options?: { amazonEnabled?: boolean }
+): string {
+  if (options?.amazonEnabled === false) {
+    return 'Amazon stage disabled in filters';
+  }
+
+  if (match) {
+    const label = formatAmazonMatchType(match.matchType);
+    const parts = [`Matched via ${label}`];
+    if (match.confidence != null) parts.push(`confidence ${formatMatchConfidence(match.confidence)}`);
+    if (match.isFallbackQuality) parts.push('fallback quality');
+    return parts.join(' · ');
+  }
+
+  const rootKey = seed.rootKeyword.toLowerCase().trim();
+  const scoped = amzByRoot.get(rootKey) ?? [];
+
+  if (allAmazonRows.length === 0) {
+    return 'No Amazon products fetched for this search';
+  }
+  if (scoped.length === 0) {
+    return 'No Amazon products in root execution pool';
+  }
+
+  const organicScoped = scoped.filter((r) => !isSponsoredAmazonRow(r));
+  const poolForCheck = organicScoped.length > 0 ? organicScoped : scoped;
+
+  const withAvailableAsin = poolForCheck.filter((r) => {
+    const asin = getAmazonRowAsin(r);
+    return !asin || !usedAsins.has(asin);
+  });
+  if (withAvailableAsin.length === 0 && poolForCheck.some((r) => getAmazonRowAsin(r))) {
+    return 'ASIN deduplication — candidates already assigned to higher-volume keywords';
+  }
+
+  if (organicScoped.length === 0) {
+    return 'Only sponsored listings available (organic required)';
+  }
+
+  const disqualifiedCount = poolForCheck.filter((r) =>
+    isDisqualifiedByProductType(seed.keyword, r)
+  ).length;
+
+  if (disqualifiedCount > 0 && disqualifiedCount >= poolForCheck.length) {
+    return 'Product-type disqualification — all candidates are accessories/parts mismatch';
+  }
+
+  if (disqualifiedCount > 0) {
+    return `Confidence threshold not met (${disqualifiedCount} candidate(s) disqualified by product-type check)`;
+  }
+
+  return 'Confidence threshold not met (category/title/keyword/fallback passes)';
+}
+
 /**
  * Two-phase batch matching for consolidation.
  *
@@ -910,9 +986,11 @@ function matchAmazonInternal(
 export function matchAmazonForKwpSeedsBatch(
   seeds: KwpSeedInput[],
   allAmazonRows: AmazonProductRow[],
-  amzByRoot: Map<string, AmazonProductRow[]>
-): Map<string, AmazonMatchResult | null> {
-  const results = new Map<string, AmazonMatchResult | null>();
+  amzByRoot: Map<string, AmazonProductRow[]>,
+  options?: { amazonEnabled?: boolean }
+): Map<string, AmazonSeedMatchOutcome> {
+  const results = new Map<string, AmazonSeedMatchOutcome>();
+  const matchOnly = new Map<string, AmazonMatchResult | null>();
   const usedAsins = new Set<string>();
 
   const ordered = [...seeds].sort(
@@ -930,14 +1008,14 @@ export function matchAmazonForKwpSeedsBatch(
       usedAsins,
       'strict'
     );
-    results.set(seed.key, strict);
+    matchOnly.set(seed.key, strict);
     const asin = strict ? getAmazonRowAsin(strict.row) : null;
     if (asin) usedAsins.add(asin);
   }
 
   // Phase B: fallback for unmatched
   for (const seed of ordered) {
-    if (results.get(seed.key)) continue;
+    if (matchOnly.get(seed.key)) continue;
 
     const rootKey = seed.rootKeyword.toLowerCase().trim();
     const scopedAmz = amzByRoot.get(rootKey) ?? [];
@@ -948,14 +1026,28 @@ export function matchAmazonForKwpSeedsBatch(
       usedAsins,
       'fallback'
     );
-    results.set(seed.key, fallback);
+    matchOnly.set(seed.key, fallback);
     const asin = fallback ? getAmazonRowAsin(fallback.row) : null;
     if (asin) usedAsins.add(asin);
   }
 
+  for (const seed of ordered) {
+    const match = matchOnly.get(seed.key) ?? null;
+    const diagnosticReason = resolveAmazonMatchDiagnosticReason(
+      seed,
+      match,
+      allAmazonRows,
+      amzByRoot,
+      usedAsins,
+      options
+    );
+    results.set(seed.key, { match, diagnosticReason });
+  }
+
   // Emit diagnostic logs
   for (const seed of ordered) {
-    const result = results.get(seed.key);
+    const outcome = results.get(seed.key)!;
+    const result = outcome.match;
     const cleanedKeyword = cleanKeywordForMatching(seed.keyword);
     const rootKey = seed.rootKeyword.toLowerCase().trim();
     const pool = [...allAmazonRows, ...(amzByRoot.get(rootKey) ?? [])];
@@ -977,13 +1069,7 @@ export function matchAmazonForKwpSeedsBatch(
       acceptedMatchType: result?.matchType ?? null,
       confidence: result?.confidence ?? null,
       isFallbackQuality: result?.isFallbackQuality ?? false,
-      rejectionReason: result
-        ? null
-        : uniquePool.length === 0
-        ? 'empty candidate pool'
-        : disqualifiedCount > 0
-        ? `all ${disqualifiedCount} candidate(s) disqualified by product-type check`
-        : 'no candidate reached confidence threshold',
+      rejectionReason: result ? null : outcome.diagnosticReason,
       disqualifiedCount,
     });
   }

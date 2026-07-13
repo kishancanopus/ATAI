@@ -73,6 +73,12 @@ function applyKnownErrorPatterns(text: string): string | null {
   if (lower.includes('no keyword planner data')) {
     return 'No Keyword Planner data returned';
   }
+  if (lower.includes('no keywords passed google trends sustainability threshold') || lower.includes('google trends sustainability threshold')) {
+    return 'No keywords passed Google Trends sustainability threshold';
+  }
+  if (lower.includes('no keywords passed google trends threshold') || lower.includes('google trends threshold')) {
+    return 'No keywords passed Google Trends threshold';
+  }
   // Check specific "filtered out" variants before the generic catch-alls
   if (lower.includes('no alibaba products remained after filtering') || lower.includes('alibaba') && lower.includes('after filtering')) {
     return 'Alibaba products fetched but all were removed by your active filters';
@@ -122,6 +128,29 @@ export function formatPipelineStageMessage(raw: unknown, fallback = ''): string 
 
   if (text.length > 200) return `${text.slice(0, 197)}…`;
   return text;
+}
+
+const VARIANT_SCOPE_PREFIX = 'For selected variant: ';
+
+/** Prefix hub / stage copy so users know status is for one variant, not the whole search. */
+export function scopeMessageForSelectedVariant(message: string): string {
+  const text = String(message ?? '').trim();
+  if (!text) return text;
+
+  const lower = text.toLowerCase();
+  if (lower.startsWith('for selected variant:')) return text;
+  if (lower.includes('this variant') || lower.includes('for this variant')) return text;
+  if (
+    lower.startsWith('waiting to start') ||
+    lower.startsWith('loading pipeline status') ||
+    lower.startsWith('loading per-stage status') ||
+    lower.startsWith('not enabled in search filters') ||
+    lower.startsWith('initial state')
+  ) {
+    return text;
+  }
+
+  return `${VARIANT_SCOPE_PREFIX}${text}`;
 }
 
 /** Pick the best raw string from a stage object, then format it */

@@ -321,6 +321,8 @@ MAX_KEYWORDS = 30
 BATCH_SIZE = 5
 GLOBAL_TIMEOUT = 55
 REQUEST_TIMEOUT = 8
+# Weeks at or above this interest level count toward GT Sustainability (0–100).
+GT_SUSTAINABILITY_THRESHOLD = 30
 
 
 # ======================================================
@@ -475,6 +477,14 @@ def fetch_serpapi_batch(keywords, geo, timeframe):
 # ANALYZE
 # ======================================================
 
+def compute_sustainability(pts, threshold=GT_SUSTAINABILITY_THRESHOLD):
+    """Share of weeks (0–100) where interest stayed at or above the threshold."""
+    if not pts:
+        return 0
+    weeks_above = sum(1 for p in pts if p >= threshold)
+    return round((weeks_above / len(pts)) * 100, 2)
+
+
 def analyze(keyword, pts, geo, months):
 
     if not pts:
@@ -482,6 +492,7 @@ def analyze(keyword, pts, geo, months):
 
     avg = round(sum(pts) / len(pts), 2)
     peak = max(pts)
+    sustainability = compute_sustainability(pts)
 
     if len(pts) >= 6:
         last3 = sum(pts[-3:]) / 3
@@ -512,6 +523,8 @@ def analyze(keyword, pts, geo, months):
         "window_months": months,
         "gt_interest_avg": avg,
         "gt_interest_peak": peak,
+        "gt_sustainability": sustainability,
+        "gt_sustainability_threshold": GT_SUSTAINABILITY_THRESHOLD,
         "gt_interest_trend": trend,
         "gt_interest_change_pct": pct,
         "source": "google_trends"
@@ -667,9 +680,9 @@ def lambda_handler(event, context):
 
                 results = [
                     x for x in results
-                    if x["gt_interest_avg"] >= min_score
+                    if x.get("gt_sustainability", 0) >= min_score
                 ]
-                print(f"Filtered results: {len(results)} items remain above score {min_score}")
+                print(f"Filtered results: {len(results)} items remain above GT sustainability {min_score}")
             except Exception as fe:
                 print(f"Filtering error: {fe}")
                 pass
@@ -684,7 +697,7 @@ def lambda_handler(event, context):
             return {
                 "stage": "google_trends_fetch",
                 "status": "EMPTY",
-                "message": "No keywords passed Google Trends threshold",
+                "message": "No keywords passed Google Trends sustainability threshold",
                 "filtered_count": 0,
                 "raw_count": raw_count,
                 "s3_bucket": None,
