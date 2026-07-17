@@ -2428,7 +2428,7 @@ const Dashboard = () => {
             margin_min: alibabaFilters && costBelow > 0 ? costBelow : undefined,
             moq_max: alibabaFilters && moq ? parseInt(moq) : undefined,
             supplier_rating_min: alibabaFilters && alibabaRating > 0 ? alibabaRating : undefined,
-            verified_supplier: alibabaFilters ? verifiedSupplier : undefined,
+            verified_supplier: alibabaFilters && verifiedSupplier ? true : undefined,
           }
         };
 
@@ -3856,18 +3856,26 @@ const Dashboard = () => {
             </div>
 
             <div className="flex items-center gap-3">
-              <span className={`text-xs font-bold tracking-widest uppercase ${!alibabaFilters ? 'text-gray-500' : 'text-gray-300'}`}>MOQ</span>
-              <input
-                type="text"
-                value={moq}
-                onChange={(e) => setMoq(e.target.value)}
-                disabled={!alibabaFilters || fieldsDisabled}
-                placeholder="e.g. 10"
-                className={`w-20 h-8 px-2 py-1 text-center rounded-lg border text-xs transition-all ${(!alibabaFilters || fieldsDisabled)
-                  ? 'bg-white/5 text-white/30 border-white/5 cursor-not-allowed'
-                  : 'bg-black/20 text-white border-white/15 hover:border-white/30 focus:outline-none focus:border-blue-400'
-                  }`}
-              />
+              <span className={`text-xs font-bold tracking-widest uppercase ${!alibabaFilters ? 'text-gray-500' : 'text-gray-300'}`}>MOQ FILTER</span>
+              <div className="flex items-center gap-2">
+                <span className={`text-xs ${!alibabaFilters ? 'text-gray-500' : 'text-gray-400'}`}>MAX</span>
+                <input
+                  type="text"
+                  value={moq}
+                  onChange={(e) => setMoq(e.target.value)}
+                  disabled={!alibabaFilters || fieldsDisabled}
+                  placeholder="0"
+                  title={
+                    fieldsDisabled && moq
+                      ? `Max MOQ ${moq} (locked during search)`
+                      : 'Maximum MOQ — only suppliers with MOQ at or below this value'
+                  }
+                  className={`w-20 h-8 px-2 py-1 text-center rounded-lg border text-xs transition-all ${(!alibabaFilters || fieldsDisabled)
+                    ? 'bg-white/5 text-white/30 border-white/5 cursor-not-allowed'
+                    : 'bg-black/20 text-white border-white/15 hover:border-white/30 focus:outline-none focus:border-blue-400'
+                    }`}
+                />
+              </div>
             </div>
 
             <div className="flex items-center gap-3">

@@ -1,7 +1,6 @@
 # AMAZON CLEAN LAMBDA FUNCTION
-# v2: Filter ordering fix — write the full unfiltered normalized dataset to Parquet
-# so that amazonKwpMatch.ts has the complete candidate pool for matching.
-# User price/reviews/rating filters are applied downstream (products API / consolidation).
+# v3: Apply user price/reviews/rating filters in clean when UI values are provided.
+# Missing filter keys (not null) mean "no filter" — keep all normalized rows.
 
 import json
 import os
@@ -27,6 +26,22 @@ def safe_get(d, *keys):
             return d[k]
     return None
 
+
+def pick_filter(src, key):
+    """Return a filter value only when the key exists and is non-null."""
+    if not isinstance(src, dict) or key not in src:
+        return None
+    val = src[key]
+    return None if val is None else val
+
+
+def filter_source(event):
+    nested = event.get("filters")
+    if isinstance(nested, dict):
+        return nested
+    return event if isinstance(event, dict) else {}
+
+
 def parse_price(val):
     if val is None:
         return None
@@ -47,17 +62,20 @@ def parse_price(val):
             return None
     return None
 
+
 def parse_int(val):
     if val is None:
         return None
     m = re.search(r"(\d+)", str(val).replace(",", ""))
     return int(m.group(1)) if m else None
 
+
 def parse_float(val):
     if val is None:
         return None
     m = re.search(r"(\d+(\.\d+)?)", str(val).replace(",", ""))
     return float(m.group(1)) if m else None
+
 
 # -----------------------
 # Extractors
@@ -71,11 +89,13 @@ def extract_category(item):
 
     return cat
 
+
 def extract_image_url(item):
     img = safe_get(item, "imageUrl", "image", "thumbnail")
     if isinstance(img, list):
         return img[0]
     return img
+
 
 # -----------------------
 # Normalize item
@@ -100,14 +120,12 @@ def normalize_item(item, keyword, geo, date, search_category):
         "full_category": safe_get(item, "category", "categories")
     }
 
+
 # -----------------------
-# Filter function (kept for diagnostics / downstream use)
-# NOT applied to the Parquet write — see s3_json_to_parquet for rationale.
+# Filter function
 # -----------------------
 def apply_amazon_filters(df, filters):
-
-    if not filters.get("amazon_filters_on", False):
-        print("🟡 Filters OFF — skipping filter pass")
+    if df.empty:
         return df
 
     price_min = filters.get("price_min")
@@ -117,14 +135,16 @@ def apply_amazon_filters(df, filters):
     min_rating = filters.get("min_rating")
 
     def is_active_min(val):
-        if val is None: return False
+        if val is None:
+            return False
         try:
             return float(val) > 0
         except:
             return False
 
     def is_active_max(val):
-        if val is None: return False
+        if val is None:
+            return False
         try:
             fval = float(val)
             return fval > 0 and fval < 999999
@@ -137,53 +157,54 @@ def apply_amazon_filters(df, filters):
     has_reviews_max = is_active_max(reviews_max)
     has_rating_min = is_active_min(min_rating)
 
+    if not (has_price_min or has_price_max or has_reviews_min or has_reviews_max or has_rating_min):
+        print("No active Amazon user filters — keeping all rows")
+        return df
+
+    print(
+        "Applying Amazon filters:",
+        f"price_min={has_price_min}",
+        f"price_max={has_price_max}",
+        f"reviews_min={has_reviews_min}",
+        f"reviews_max={has_reviews_max}",
+        f"rating_min={has_rating_min}",
+    )
+    print(f"Rows before filtering: {len(df)}")
+
     filtered_rows = []
 
     for _, row in df.iterrows():
-
         price = row.get("amazon_price_usd")
         reviews = row.get("reviews_count")
         rating = row.get("rating")
 
-        # PRICE
         if has_price_min:
             if price is None or price < float(price_min):
                 continue
         if has_price_max:
             if price is None or price > float(price_max):
                 continue
-
-        # REVIEWS
         if has_reviews_min:
             if reviews is None or reviews < int(reviews_min):
                 continue
         if has_reviews_max:
             if reviews is None or reviews > int(reviews_max):
                 continue
-
-        # RATING
         if has_rating_min:
             if rating is None or rating < float(min_rating):
                 continue
 
         filtered_rows.append(row)
 
-    return pd.DataFrame(filtered_rows)
+    df_filtered = pd.DataFrame(filtered_rows)
+    print(f"Rows after filtering: {len(df_filtered)}")
+    return df_filtered
+
 
 # -----------------------
 # S3 Processing
-#
-# FILTER ORDERING (v2):
-#   OLD: normalize → filter → save to Parquet → match
-#   NEW: normalize → save full pool to Parquet → match → filters applied downstream
-#
-# Rationale: applying price/review/rating filters before matching shrinks the
-# candidate pool BEFORE amazonKwpMatch.ts runs, causing valid product-type
-# matches to be silently dropped. The final products API (/api/products) already
-# applies user-configured display filters on top of the ranked output.
 # -----------------------
 def s3_json_to_parquet(input_bucket, input_key, output_bucket, output_key, filters, search_category):
-
     obj = s3.get_object(Bucket=input_bucket, Key=input_key)
     data = json.load(obj["Body"])
 
@@ -207,19 +228,13 @@ def s3_json_to_parquet(input_bucket, input_key, output_bucket, output_key, filte
             print("Normalize error:", e)
 
     df = pd.DataFrame(normalized)
-    print(f"📊 Total normalized rows (full pool, unfiltered): {len(df)}")
+    print(f"Total normalized rows: {len(df)}")
 
-    # Diagnostic: report what the filter WOULD have removed (for logging only)
-    if filters.get("amazon_filters_on", False) and not df.empty:
-        df_filtered = apply_amazon_filters(df, filters)
-        print(
-            f"📊 Rows that WOULD pass user filters (not applied here): "
-            f"{len(df_filtered)} / {len(df)}"
-        )
-    else:
-        df_filtered = df  # reference only
+    if df.empty:
+        return 0, None, None
 
-    # Write FULL unfiltered pool to Parquet (matcher needs all candidates)
+    df = apply_amazon_filters(df, filters)
+
     if df.empty:
         return 0, None, None
 
@@ -227,10 +242,6 @@ def s3_json_to_parquet(input_bucket, input_key, output_bucket, output_key, filte
     pq.write_table(pa.Table.from_pandas(df), tmp.name)
     s3.upload_file(tmp.name, output_bucket, output_key)
 
-    # Extract browse nodes from the first row of the relevance-sorted dataset.
-    # Items arrive pre-sorted by relevance score from the fetch Lambda, so
-    # iloc[0] represents the highest-relevance product — the best proxy for the
-    # intended product category without running the full matcher here.
     target_node = None
     fallback_node = None
     full_cat = df.iloc[0].get("full_category", "")
@@ -243,9 +254,10 @@ def s3_json_to_parquet(input_bucket, input_key, output_bucket, output_key, filte
         elif len(parts) >= 1:
             target_node, fallback_node = parts[0], parts[0]
 
-    print(f"🗂️  Browse nodes → target={target_node} fallback={fallback_node}")
+    print(f"Browse nodes -> target={target_node} fallback={fallback_node}")
 
     return len(df), target_node, fallback_node
+
 
 # -----------------------
 # Output Key
@@ -254,12 +266,25 @@ def generate_output_key(input_key, search_mode):
     timestamp = input_key.split("/")[-1].replace(".json", "")
     return f"clean/{search_mode}/amazon/{timestamp}.parquet"
 
+
+def build_amazon_filters(event):
+    src = filter_source(event)
+    return {
+        "amazon_filters_on": bool(pick_filter(src, "enable_amazon")),
+        "price_min": pick_filter(src, "amz_price_min"),
+        "price_max": pick_filter(src, "amz_price_max"),
+        "reviews_min": pick_filter(src, "reviews_min"),
+        "reviews_max": pick_filter(src, "reviews_max"),
+        "min_rating": pick_filter(src, "rating_min"),
+    }
+
+
 # -----------------------
-# 🚀 LAMBDA HANDLER
+# LAMBDA HANDLER
 # -----------------------
 def lambda_handler(event, context):
     try:
-        print("🚀 Event:", event)
+        print("Event:", event)
 
         input_bucket = event.get("input_bucket")
         input_key = event.get("input_key")
@@ -274,17 +299,8 @@ def lambda_handler(event, context):
                 "rows_processed": 0
             }
 
-        # Filters passed through for diagnostic logging only (not applied to Parquet)
-        filters = {
-            "amazon_filters_on": event.get("enable_amazon", False),
-            "price_min": event.get("amz_price_min"),
-            "price_max": event.get("amz_price_max"),
-            "reviews_min": event.get("reviews_min"),
-            "reviews_max": event.get("reviews_max"),
-            "min_rating": event.get("rating_min"),
-        }
-
-        print("🔍 User filters (diagnostic only, not applied to Parquet):", filters)
+        filters = build_amazon_filters(event)
+        print("Amazon user filters:", filters)
 
         output_bucket = OUTPUT_BUCKET
         output_key = generate_output_key(input_key, search_mode)
@@ -302,7 +318,7 @@ def lambda_handler(event, context):
             return {
                 "stage": "amazon_clean",
                 "status": "EMPTY",
-                "message": "No Amazon products after normalization",
+                "message": "No Amazon products remained after normalization/filtering",
                 "rows_processed": 0,
                 "target_browse_node": None,
                 "fallback_browse_node": None,
@@ -312,7 +328,7 @@ def lambda_handler(event, context):
         return {
             "stage": "amazon_clean",
             "status": "SUCCEEDED",
-            "message": f"Amazon clean stage completed — {rows} rows written to Parquet (unfiltered pool)",
+            "message": f"Amazon clean stage completed — {rows} rows written to Parquet",
             "rows_processed": rows,
             "target_browse_node": target_node,
             "fallback_browse_node": fallback_node,

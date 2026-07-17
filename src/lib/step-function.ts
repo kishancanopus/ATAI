@@ -101,6 +101,17 @@ function ensureInt(val: string | number | undefined, fallback: number): number {
     return typeof val === 'number' ? Math.floor(val) : parseInt(val) || fallback;
 }
 
+/** Only include optional pipeline fields when the user provided an active value (never null). */
+function assignIfDefined(
+    target: Record<string, unknown>,
+    key: string,
+    value: unknown
+): void {
+    if (value !== undefined && value !== null) {
+        target[key] = value;
+    }
+}
+
 /** Build pipeline input and start a single Step Function execution. Used for manual/auto and for each keyword in category search. */
 async function buildInputAndStartExecution(
     keyword: string,
@@ -121,21 +132,54 @@ async function buildInputAndStartExecution(
     const search_volume_max = filters.search_volume_max != null ? Number(filters.search_volume_max) : 0;
     const google_trend_score = filters.google_trend_score != null ? Number(filters.google_trend_score) : 0;
 
-    const amz_price_min = filters.amz_price_min != null && Number(filters.amz_price_min) > 0 ? Number(filters.amz_price_min) : null;
-    const amz_price_max = filters.amz_price_max != null && Number(filters.amz_price_max) > 0 && Number(filters.amz_price_max) < 999999 ? Number(filters.amz_price_max) : null;
-    const reviews_min = filters.reviews_min != null && Number(filters.reviews_min) > 0 ? Number(filters.reviews_min) : null;
-    const reviews_max = filters.reviews_max != null && Number(filters.reviews_max) > 0 && Number(filters.reviews_max) < 999999 ? Number(filters.reviews_max) : null;
-    const rating_min = filters.rating_min != null && Number(filters.rating_min) > 0 ? Number(filters.rating_min) : null;
-    const fcl_min = filters.fcl_min != null && Number(filters.fcl_min) > 0 ? Number(filters.fcl_min) : null;
-    const fcl_max = filters.fcl_max != null && Number(filters.fcl_max) > 0 && Number(filters.fcl_max) < 999999 ? Number(filters.fcl_max) : null;
+    const amz_price_min =
+        filters.amz_price_min != null && Number(filters.amz_price_min) > 0
+            ? Number(filters.amz_price_min)
+            : undefined;
+    const amz_price_max =
+        filters.amz_price_max != null &&
+        Number(filters.amz_price_max) > 0 &&
+        Number(filters.amz_price_max) < 999999
+            ? Number(filters.amz_price_max)
+            : undefined;
+    const reviews_min =
+        filters.reviews_min != null && Number(filters.reviews_min) > 0
+            ? Number(filters.reviews_min)
+            : undefined;
+    const reviews_max =
+        filters.reviews_max != null &&
+        Number(filters.reviews_max) > 0 &&
+        Number(filters.reviews_max) < 999999
+            ? Number(filters.reviews_max)
+            : undefined;
+    const rating_min =
+        filters.rating_min != null && Number(filters.rating_min) > 0
+            ? Number(filters.rating_min)
+            : undefined;
+    const fcl_min =
+        filters.fcl_min != null && Number(filters.fcl_min) > 0
+            ? Number(filters.fcl_min)
+            : undefined;
+    const fcl_max =
+        filters.fcl_max != null &&
+        Number(filters.fcl_max) > 0 &&
+        Number(filters.fcl_max) < 999999
+            ? Number(filters.fcl_max)
+            : undefined;
 
-    const margin_min = filters.margin_min != null && Number(filters.margin_min) > 0 ? Number(filters.margin_min) : null;
+    const margin_min =
+        filters.margin_min != null && Number(filters.margin_min) > 0
+            ? Number(filters.margin_min)
+            : undefined;
     const moq_max =
-      filters.moq_max != null && Number(filters.moq_max) > 0
-        ? ensureInt(filters.moq_max, 0)
-        : null;
-    const supplier_rating_min = filters.supplier_rating_min != null && Number(filters.supplier_rating_min) > 0 ? Number(filters.supplier_rating_min) : null;
-    const verified_supplier = filters.verified_supplier ? true : null;
+        filters.moq_max != null && Number(filters.moq_max) > 0
+            ? ensureInt(filters.moq_max, 0)
+            : undefined;
+    const supplier_rating_min =
+        filters.supplier_rating_min != null && Number(filters.supplier_rating_min) > 0
+            ? Number(filters.supplier_rating_min)
+            : undefined;
+    const verified_supplier = filters.verified_supplier === true ? true : undefined;
 
     // Derive a human-readable prefix from the search mode
     const modePrefix =
@@ -162,18 +206,21 @@ async function buildInputAndStartExecution(
         search_volume_min,
         search_volume_max,
         google_trend_score,
-        amz_price_min,
-        amz_price_max,
-        reviews_min,
-        reviews_max,
-        rating_min,
-        fcl_min,
-        fcl_max,
-        margin_min,
-        moq_max,
-        supplier_rating_min,
-        verified_supplier,
     };
+
+    // Marketplace filters: omit keys entirely when the user did not set a value.
+    // Clean Lambdas treat missing keys as "no filter" (never null).
+    assignIfDefined(inputObj, "amz_price_min", amz_price_min);
+    assignIfDefined(inputObj, "amz_price_max", amz_price_max);
+    assignIfDefined(inputObj, "reviews_min", reviews_min);
+    assignIfDefined(inputObj, "reviews_max", reviews_max);
+    assignIfDefined(inputObj, "rating_min", rating_min);
+    assignIfDefined(inputObj, "fcl_min", fcl_min);
+    assignIfDefined(inputObj, "fcl_max", fcl_max);
+    assignIfDefined(inputObj, "margin_min", margin_min);
+    assignIfDefined(inputObj, "moq_max", moq_max);
+    assignIfDefined(inputObj, "supplier_rating_min", supplier_rating_min);
+    assignIfDefined(inputObj, "verified_supplier", verified_supplier);
     const input = JSON.stringify(inputObj);
 
     const command = new StartExecutionCommand({

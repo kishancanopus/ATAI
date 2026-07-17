@@ -241,12 +241,7 @@
                 "search_mode.$": "$.input.search_mode",
                 "search_category.$": "$.input.search_category",
                 "size.$": "$.input.size",
-                "enable_amazon": true,
-                "amz_price_min.$": "$.input.amz_price_min",
-                "amz_price_max.$": "$.input.amz_price_max",
-                "reviews_min.$": "$.input.reviews_min",
-                "reviews_max.$": "$.input.reviews_max",
-                "rating_min.$": "$.input.rating_min"
+                "filters.$": "$.input"
             },
             "ResultPath": "$.amazon_clean",
             "Next": "AmazonFCLCalculation"
@@ -335,12 +330,8 @@
                 "input_key.$": "$.alibaba_fetch.data.s3_key",
                 "search_mode.$": "$.input.search_mode",
                 "search_category.$": "$.input.search_category",
-                "enable_alibaba": true,
-                "margin_min.$": "$.input.margin_min",
-                "moq_max.$": "$.input.moq_max",
-                "supplier_rating_min.$": "$.input.supplier_rating_min",
-                "verified_supplier.$": "$.input.verified_supplier",
-                "size.$": "$.input.size"
+                "size.$": "$.input.size",
+                "filters.$": "$.input"
             },
             "ResultPath": "$.alibaba_clean",
             "Next": "MarketplaceStageComplete"

@@ -293,8 +293,35 @@ def normalize_item(item, data_collected_at, keyword, search_category=None):
 
 # ─────────────────────────────────────────────────────────────────────────────
 # ALIBABA FILTERS
-# Null / empty / zero filter values mean "do not apply this filter".
+# Missing keys / null / empty / zero filter values mean "do not apply this filter".
 # ─────────────────────────────────────────────────────────────────────────────
+
+def _pick_filter(src, key):
+    """Return a filter value only when the key exists and is non-null."""
+    if not isinstance(src, dict) or key not in src:
+        return None
+    val = src[key]
+    return None if val is None else val
+
+
+def _filter_source(event):
+    nested = event.get("filters")
+    if isinstance(nested, dict):
+        return nested
+    return event if isinstance(event, dict) else {}
+
+
+def _build_alibaba_filters(event):
+    src = _filter_source(event)
+    return {
+        "enable_alibaba": bool(_pick_filter(src, "enable_alibaba")),
+        "margin_min": _pick_filter(src, "margin_min"),
+        "moq_max": _pick_filter(src, "moq_max"),
+        "min_rating": _pick_filter(src, "supplier_rating_min"),
+        "verified_supplier": _pick_filter(src, "verified_supplier"),
+        "size": _pick_filter(src, "size") if "size" in src else event.get("size"),
+    }
+
 
 def _filter_value_is_active(val):
     """True when a filter parameter should be applied (non-null, non-empty, non-zero)."""
@@ -556,14 +583,8 @@ def lambda_handler(event, context):
         if search_mode == "manual_search":
             search_category = None
 
-        filters = {
-            "enable_alibaba":    event.get("enable_alibaba"),
-            "margin_min":        event.get("margin_min"),
-            "moq_max":           event.get("moq_max"),
-            "min_rating":        event.get("supplier_rating_min"),
-            "verified_supplier": event.get("verified_supplier"),
-            "size":              event.get("size"),
-        }
+        filters = _build_alibaba_filters(event)
+        print("[INFO] Alibaba user filters:", filters)
 
         output_key = generate_output_key(input_key, search_mode)
 
